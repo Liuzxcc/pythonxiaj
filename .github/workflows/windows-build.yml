@@ -1,0 +1,70 @@
+name: Build Windows Installer
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: Verify environment
+        shell: pwsh
+        run: |
+          python --version
+          python -c "import tkinter; print('tkinter OK')"
+          python -c "import xlrd; assert int(xlrd.__version__.split('.')[0]) < 2; print('xlrd OK', xlrd.__version__)"
+          python -c "import xlwt; print('xlwt OK')"
+          python -c "import PyInstaller; print('pyinstaller', PyInstaller.__version__)"
+
+      - name: Verify source layout
+        shell: pwsh
+        run: |
+          "main.py", "core/__init__.py", "gui/__init__.py", "installer.iss" | ForEach-Object {
+            if (!(Test-Path $_)) { throw "Missing required file: $_" }
+          }
+
+      - name: Build exe
+        shell: pwsh
+        # hidden-import 缺一不可：openpyxl / xlutils 只在运行时被 __import__ 探测或动态导入，
+        # 静态分析拿不到，漏掉会让 exe 一启动就报「缺少模块」。
+        run: >
+          pyinstaller --noconfirm --onefile --windowed --name "进度跟踪报表工具"
+          --hidden-import tkinter
+          --hidden-import tkinter.ttk
+          --hidden-import tkinter.filedialog
+          --hidden-import tkinter.messagebox
+          --hidden-import threading
+          --hidden-import openpyxl
+          --hidden-import xlutils
+          --hidden-import xlutils.copy
+          --collect-submodules core
+          --icon assets/app.ico
+          main.py
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: installer/*.exe

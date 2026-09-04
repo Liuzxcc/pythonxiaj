@@ -1,0 +1,22 @@
+# ---- Python ----
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# ---- PyInstaller 构建产物 ----
+build/
+dist/
+installer/
+*.spec
+
+# ---- 项目产物 / 大文件 ----
+output/
+.bak-*.xls
+.synced-*.xls
+
+# ---- 临时 / 缓存 ----
+.workbuddy/
+.DS_Store
+.venv/
+venv/
