@@ -317,6 +317,16 @@ class SyncWindow:
         if stat["write"] == 0 and stat["total"] == 0:
             lines.append("未发现可处理的明细文件，请检查源目录与文件命名。")
 
+        # 明细有、但大表无对应行的井（"数据没写进去"的真因）
+        unmatched = result.get("unmatched") or {}
+        if unmatched:
+            total_miss = sum(len(v) for v in unmatched.values())
+            stages = "、".join("%s %d 口" % (s, len(v)) for s, v in unmatched.items())
+            lines.append("⚠ 明细有 %d 口井在大表找不到对应行、未写入（%s）"
+                         % (total_miss, stages))
+            lines.append("　大表是按井号匹配的主表，工具只填已有行、不新建行；"
+                         "请把这些井补进大表，或确认是否在用正确的大表。")
+
         self.status_label.config(text="\n".join(lines), fg=OK_FG, bg=OK_BG)
 
     def _on_error(self, e, tb):

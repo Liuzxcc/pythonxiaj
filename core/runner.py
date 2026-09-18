@@ -26,7 +26,7 @@ from . import config, restructure as rst
 from .detail_reader import load_all
 from .filename_parser import is_trackbook, scan_dir
 from .reports import build_logger, summarize, write_diff
-from .sync_engine import build_stage_index, sync_sheet
+from .sync_engine import build_stage_index, sync_sheet, unmatched_detail_wells
 from .trackbook import TrackBook
 from .writer import write_back, write_inplace
 
@@ -123,6 +123,14 @@ def _run(cfg: dict, on_log, on_done, on_error):
                     on_log("    ⚠ %s 缺少'实际完成'列，已回退到'当前进度'；"
                            "建议先执行列结构调整" % c)
 
+        # ---- 4.5 明细有但大表无对应行的井（"数据没写进去"的真因）----
+        unmatched = unmatched_detail_wells(track.sheets, stage_index)
+        for stage, wells in unmatched.items():
+            preview = "、".join(wells[:12]) + (" …" if len(wells) > 12 else "")
+            on_log("⚠ [%s] 明细中有 %d 口井在大表找不到对应行，未写入"
+                   "（大表是按井号匹配的主表，工具只填已有行、不新建行）：%s"
+                   % (stage, len(wells), preview))
+
         # ---- 5. 报告 ----
         stat = summarize(actions)
         diff_path = None
@@ -174,7 +182,7 @@ def _run(cfg: dict, on_log, on_done, on_error):
             on_done({"actions": actions, "stat": stat, "diff": diff_path,
                      "synced": synced, "backup": backup, "kept_format": kept_format,
                      "mode": result_mode, "log": logger.log_path,
-                     "restructure": synced_note})
+                     "restructure": synced_note, "unmatched": unmatched})
 
     except Exception as e:
         tb = traceback.format_exc()

@@ -148,6 +148,39 @@ def pick_latest(records: list[DetailRecord]) -> DetailRecord:
     return max(records, key=lambda r: (r.flow_count, r.source_name))
 
 
+def unmatched_detail_wells(track_sheets: list, stage_index: dict) -> dict:
+    """明细有、但大表所有 sheet 都找不到对应井号的井。
+
+    返回 {stage: [well_display, ...]}。这些井在大表里没有行，
+    工具只填已有行、不新建行，所以无法写入——这是"数据没写进去"最常见的真因，
+    必须显式提示，避免用户误以为工具出错了。
+
+    track_sheets: List[TrackSheet]（提供 .sheet / .name / .locate / .cell）。
+    """
+    # 收集每个阶段在大表里出现过的井号（canon 键）
+    book_wells: dict[str, set] = {}
+    for ts in track_sheets:
+        for stage in stage_index:
+            cols = ts.locate(stage)
+            if cols is None:
+                continue
+            cw = cols["well"]
+            s = book_wells.setdefault(stage, set())
+            sh = ts.sheet
+            for r in range(config.ROW_DATA_START, sh.nrows):
+                w = canon(ts.cell(r, cw))
+                if w:
+                    s.add(w)
+
+    out: dict[str, list] = {}
+    for stage, well2rec in stage_index.items():
+        bset = book_wells.get(stage, set())
+        miss = [r.well_display for r in well2rec.values() if r.well not in bset]
+        if miss:
+            out[stage] = miss
+    return out
+
+
 def build_stage_index(records: list[DetailRecord]) -> dict:
     """构建 {stage: {well_key: DetailRecord}}。"""
     by_stage: dict[str, dict[str, list[DetailRecord]]] = {}
