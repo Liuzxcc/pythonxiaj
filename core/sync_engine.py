@@ -95,6 +95,13 @@ def decide(payload: str, status: str, old: str,
     if config.REVIEW_SUFFIX in old_n and status == config.STATUS_DONE:
         return new
 
+    # ⑥ 兜底：原值是脏日期/脏数据 → 覆盖（但同值仍要幂等跳过）
+    # 必须排在「已完成→审核中」保护之前，否则"当前审核人员"这类占位符会被
+    # 误判为"已完成"而跳过，无法替换成真实的审核人姓名。
+    # 真实的完成日期不是脏数据，因此仍受下一条规则保护。
+    if is_dirty_date(old_n) and canon(old_n) != canon(new):
+        return new
+
     # ③ 已完成 → 审核中（回退）
     if config.REVIEW_SUFFIX in new and config.REVIEW_SUFFIX not in old_n:
         return new if allow_recheck_overwrite else None
@@ -108,10 +115,6 @@ def decide(payload: str, status: str, old: str,
     # ⑤ 都有日期 → 取较新
     if not is_dirty_date(old_d) and not is_dirty_date(new_d):
         return new if new_d > old_d else None
-
-    # 兜底：原值是脏日期 → 覆盖
-    if is_dirty_date(old_n):
-        return new
 
     return None
 
