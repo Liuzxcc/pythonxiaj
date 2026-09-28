@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -33,8 +34,26 @@ RUN_BG, RUN_FG = "#FFF7E6", "#9A6B00"
 FONT = "Microsoft YaHei"
 FONT_MONO = "Consolas"
 
-# 状态持久化文件：仅保存上次源目录
-STATE_FILE = pathlib.Path(__file__).resolve().parent.parent / ".workbuddy" / "gui_state.json"
+# ---------------------------------------------------------------- 状态持久化
+# 重要：Windows 版是 PyInstaller **onefile** 单文件打包，运行时把全部内容解压到
+# 临时目录（每次运行路径都不同、退出即被删除）；macOS .app 也可能被整体替换。
+# 因此状态文件绝不能放在「相对 __file__」的位置，必须落到用户级配置目录，
+# 否则表现为「第二次打开没有记住上次选择的文件夹」。
+def _user_config_dir() -> pathlib.Path:
+    """跨平台用户级配置目录：打包后依然可读可写、长期保留。"""
+    app = "进度跟踪报表工具"
+    if sys.platform.startswith("win"):
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    elif sys.platform == "darwin":
+        base = pathlib.Path.home() / "Library" / "Application Support"
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME") or (pathlib.Path.home() / ".config")
+    return pathlib.Path(base) / app
+
+
+STATE_FILE = _user_config_dir() / "gui_state.json"
+# 旧版本（及源码运行）写在项目根 .workbuddy 下：仅用于一次性迁移读取，不再写入
+_LEGACY_STATE_FILE = pathlib.Path(__file__).resolve().parent.parent / ".workbuddy" / "gui_state.json"
 
 
 class SyncWindow:
@@ -49,7 +68,12 @@ class SyncWindow:
         self.root.configure(bg=BG)
 
         # 源目录（单个）
-        self.src_var = tk.StringVar(value=str(config.DEFAULT_SOURCE_DIR))
+        # config.DEFAULT_SOURCE_DIR 是开发环境路径，换机器 / 打包到 Windows 后并不存在，
+        # 此时回退到用户主目录，避免界面上显示一条无效路径。
+        default_src = config.DEFAULT_SOURCE_DIR
+        if not pathlib.Path(default_src).is_dir():
+            default_src = pathlib.Path.home()
+        self.src_var = tk.StringVar(value=str(default_src))
         # 跟踪大表路径（内部维护，不显示在 UI）
         self.track_path: str | None = None
 
@@ -148,15 +172,17 @@ class SyncWindow:
     # ================= 状态持久化 =================
 
     def _load_state(self):
-        """加载上次使用的源目录。"""
-        try:
-            if STATE_FILE.exists():
-                data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-                last_dir = data.get("last_source_dir")
-                if last_dir and os.path.isdir(last_dir):
-                    self.src_var.set(last_dir)
-        except Exception:
-            pass
+        """加载上次使用的源目录：新位置优先，兼容读取旧位置（一次性迁移）。"""
+        for path in (STATE_FILE, _LEGACY_STATE_FILE):
+            try:
+                if path.exists():
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    last_dir = data.get("last_source_dir")
+                    if last_dir and os.path.isdir(last_dir):
+                        self.src_var.set(last_dir)
+                        return
+            except Exception:
+                continue
 
     def _save_state(self):
         """保存当前源目录。"""
@@ -224,6 +250,9 @@ class SyncWindow:
                                  "以下路径无效，请重新选择：\n" +
                                  "\n".join("• " + m for m in missing))
             return
+
+        # 记住本次实际使用的目录，保证下次打开默认显示它
+        self._save_state()
 
         # 极简模式：固定为「原地写原表 + 零新文件 + 保格式 + 不调整列 + 不允许回退覆盖 + 全部节点」
         cfg = {
