@@ -18,6 +18,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from core import config
+from core import __version__ as APP_VERSION
 from core.runner import run_sync
 
 # 主题色（与参考项目一致）
@@ -42,7 +43,7 @@ class SyncWindow:
     def __init__(self, auto: bool = False):
         self.auto = auto
         self.root = tk.Tk()
-        self.root.title("进度跟踪报表工具")
+        self.root.title(f"进度跟踪报表工具 v{APP_VERSION}")
         self.root.geometry("900x620")
         self.root.minsize(820, 560)
         self.root.configure(bg=BG)
@@ -92,8 +93,13 @@ class SyncWindow:
         # ---- 顶部横幅 ----
         header = tk.Frame(self.root, bg=ACCENT, padx=22, pady=18)
         header.pack(fill=tk.X)
-        tk.Label(header, text="进度跟踪报表工具", bg=ACCENT, fg="white",
-                 font=(FONT, 19, "bold")).pack(anchor=tk.W)
+        title_row = tk.Frame(header, bg=ACCENT)
+        title_row.pack(fill=tk.X)
+        tk.Label(title_row, text="进度跟踪报表工具", bg=ACCENT, fg="white",
+                 font=(FONT, 19, "bold")).pack(side=tk.LEFT, anchor=tk.W)
+        # 右上角显示版本号，便于确认本机安装的版本（排查"跑的是不是旧包"）
+        tk.Label(title_row, text=f"v{APP_VERSION}", bg=ACCENT, fg="#D6E9F8",
+                 font=(FONT, 10)).pack(side=tk.RIGHT, anchor=tk.E)
 
         body = ttk.Frame(self.root, padding=(20, 16, 20, 8))
         body.pack(fill=tk.BOTH, expand=True)
