@@ -111,11 +111,29 @@ def _backup(src: pathlib.Path, backup_dir) -> pathlib.Path:
     return dst
 
 
+def _sanitize_num_formats(wb):
+    """xlutils.copy 复制某些 .xls 时会生成 key 为 None 的自定义数字格式，
+    导致 xlwt 在 wb.save() 时抛 `TypeError: descriptor 'decode' ... NoneType`。
+    把 None/空字符串替换为带索引的安全字符串，保留原索引。
+    """
+    styles = getattr(wb, '_Workbook__styles', None)
+    if not styles:
+        return
+    nf = getattr(styles, '_num_formats', None)
+    if not nf:
+        return
+    for fmtstr, idx in list(nf.items()):
+        if fmtstr is None or fmtstr == "":
+            del nf[fmtstr]
+            new_str = "General (fmt%d)" % idx
+            nf[new_str] = idx
+
+
 def _render_preserving(src: pathlib.Path, plan: dict, dst: pathlib.Path) -> bool:
     """用 xlutils 复制原表并应用变更。成功返回 True（保格式）。
 
-    xlutils 不可用、或该 .xls 读不出格式信息时，回退到普通 xlwt 重建（丢格式），
-    并返回 False —— 调用方应据此向用户告警。
+    xlutils 不可用、或该 .xls 读不出格式信息、或 xlutils 复制后内部数字格式损坏时，
+    回退到普通 xlwt 重建（丢格式），并返回 False —— 调用方应据此向用户告警。
     """
     rb = None
     try:
@@ -126,6 +144,9 @@ def _render_preserving(src: pathlib.Path, plan: dict, dst: pathlib.Path) -> bool
         _render_plain(src, plan, dst)
         return False
 
+    # 修复 xlutils.copy 偶尔带入的 None 自定义数字格式
+    _sanitize_num_formats(wb)
+
     red = xlwt.easyxf(_CHANGED_XF)
     for idx, name in enumerate(rb.sheet_names()):
         changes = plan.get(name)
@@ -135,7 +156,11 @@ def _render_preserving(src: pathlib.Path, plan: dict, dst: pathlib.Path) -> bool
         for (r, c), v in changes.items():
             _write_value(ws, r, c, v, red)
 
-    wb.save(str(dst))
+    try:
+        wb.save(str(dst))
+    except Exception:
+        _render_plain(src, plan, dst)
+        return False
     return True
 
 
