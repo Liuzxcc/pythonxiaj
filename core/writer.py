@@ -31,8 +31,9 @@ from . import config
 from .sync_engine import Action
 from .trackbook import TrackBook
 
-# 改动的单元格用红色字体标记，方便人工扫一眼
+# 改动的单元格：红色字体 + 强制文本格式，避免日期/自定义数字格式在不同机器/WPS 版本上显示异常
 _CHANGED_XF = "font: colour_index red;"
+_CHANGED_NUM_FMT = "@"
 
 
 def _style_map():
@@ -40,7 +41,7 @@ def _style_map():
     return {
         "header": xlwt.easyxf("font: bold on; align: wrap on, vert center, horiz center;"),
         "data": xlwt.easyxf(),
-        "changed": xlwt.easyxf(_CHANGED_XF),
+        "changed": xlwt.easyxf(_CHANGED_XF, num_format_str=_CHANGED_NUM_FMT),
     }
 
 
@@ -114,7 +115,8 @@ def _backup(src: pathlib.Path, backup_dir) -> pathlib.Path:
 def _sanitize_num_formats(wb):
     """xlutils.copy 复制某些 .xls 时会生成 key 为 None 的自定义数字格式，
     导致 xlwt 在 wb.save() 时抛 `TypeError: descriptor 'decode' ... NoneType`。
-    把 None/空字符串替换为带索引的安全字符串，保留原索引。
+    同时清理历史版本误写入的 `'General (fmt%d)'` 等异常格式字符串，
+    统一替换为文本格式 '@'，避免 WPS/Excel 把单元格显示成 `(fXt165)` 之类乱码。
     """
     styles = getattr(wb, '_Workbook__styles', None)
     if not styles:
@@ -123,9 +125,17 @@ def _sanitize_num_formats(wb):
     if not nf:
         return
     for fmtstr, idx in list(nf.items()):
-        if fmtstr is None or fmtstr == "":
+        dirty = (
+            fmtstr is None
+            or fmtstr == ""
+            or "(fmt" in fmtstr          # 历史误写入的占位格式
+        )
+        if dirty:
             del nf[fmtstr]
-            new_str = "General (fmt%d)" % idx
+            # 统一用文本格式；若 '@' 已被占用，用带索引的变体保留该索引
+            new_str = "@"
+            if new_str in nf:
+                new_str = "@ (fmt%d)" % idx
             nf[new_str] = idx
 
 
@@ -147,7 +157,7 @@ def _render_preserving(src: pathlib.Path, plan: dict, dst: pathlib.Path) -> bool
     # 修复 xlutils.copy 偶尔带入的 None 自定义数字格式
     _sanitize_num_formats(wb)
 
-    red = xlwt.easyxf(_CHANGED_XF)
+    red = xlwt.easyxf(_CHANGED_XF, num_format_str=_CHANGED_NUM_FMT)
     for idx, name in enumerate(rb.sheet_names()):
         changes = plan.get(name)
         if not changes:
@@ -156,12 +166,49 @@ def _render_preserving(src: pathlib.Path, plan: dict, dst: pathlib.Path) -> bool
         for (r, c), v in changes.items():
             _write_value(ws, r, c, v, red)
 
+    # 修复历史版本误写入的乱码格式：数字格式含 (fmt 的单元格统一重写成文本格式
+    _repair_cells_with_bad_format(rb, wb, red)
+
     try:
         wb.save(str(dst))
     except Exception:
         _render_plain(src, plan, dst)
         return False
     return True
+
+
+def _repair_cells_with_bad_format(rb, wb, style):
+    """把数字格式为乱码（含 `(fmt`）的单元格统一重写成文本格式。
+
+    历史版本在修复 xlutils None 格式时写入了 'General (fmt%d)' 这类占位格式，
+    WPS/Excel 会把对应单元格显示成 `(fXt165)`。本函数扫描所有单元格，
+    若其数字格式含 `(fmt`，则按原值以文本格式重写。
+    """
+    try:
+        for sidx, name in enumerate(rb.sheet_names()):
+            sh = rb.sheet_by_index(sidx)
+            ws = wb.get_sheet(sidx)
+            for r in range(sh.nrows):
+                for c in range(sh.ncols):
+                    xf_idx = sh.cell_xf_index(r, c)
+                    xf = rb.xf_list[xf_idx]
+                    fmt_idx = xf.format_key
+                    fmt_str = ""
+                    fmt_obj = rb.format_map.get(fmt_idx)
+                    if fmt_obj is not None:
+                        fmt_str = fmt_obj.format_str or ""
+                    if "(fmt" not in fmt_str:
+                        continue
+                    val = sh.cell_value(r, c)
+                    if sh.cell_type(r, c) == xlrd.XL_CELL_DATE and val not in (None, ""):
+                        try:
+                            val = xlrd_date_to_str(val)
+                        except Exception:
+                            val = str(val)
+                    _write_value(ws, r, c, val, style)
+    except Exception:
+        # 修复是增量优化，失败不应影响主流程
+        pass
 
 
 def _render_plain(src: pathlib.Path, plan: dict, dst: pathlib.Path) -> None:
