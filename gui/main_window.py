@@ -304,7 +304,8 @@ class SyncWindow:
             lines.append("已直接写入原表：%s" % result["synced"])
             lines.append("（零新文件：未生成任何 .bak / diff / 日志）")
             if result.get("kept_format"):
-                lines.append("（已保留合并单元格/字体/边框等原表格式，改动单元格标红）")
+                lines.append("（已保留合并单元格/列宽等原表结构；本次写入的单元格为深蓝色，"
+                             "已有字体颜色原样保留）")
             else:
                 lines.append("⚠ 未能保留原表格式，已用纯 xlwt 重建，请用 WPS 核对")
         if stat["write"] == 0 and stat["total"] == 0:

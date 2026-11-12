@@ -1009,28 +1009,109 @@ def test_append_wells(tmp: pathlib.Path) -> None:
     eq("新建表后重跑不再新增（幂等）", info9b["total"], 0)
 
 
+def test_append_no_duplicate_well(tmp: pathlib.Path) -> None:
+    """K+. 井号文本差异（卧85 / 卧85井 / 卧 85 / 卧８５）应视为同一口井，不重复新增。"""
+    section("K+. 井号相同（文本差异）不重复新增")
+
+    def _write_dup_book(path, existing=None):
+        existing = existing or []
+        wb = xlwt.Workbook(encoding="utf-8")
+        h1 = ["序号", "井号", "作业类型", "地质设计", "", "工程设计", ""]
+        h2 = ["", "", "", "计划完成", "实际完成", "计划完成", "实际完成"]
+        ws = wb.add_sheet("7.修井作业")
+        for c, v in enumerate(h1):
+            if v:
+                ws.write(config.ROW_STAGE_HEADER, c, v)
+        for c, v in enumerate(h2):
+            if v:
+                ws.write(config.ROW_SUB_HEADER, c, v)
+        for i, w in enumerate(existing):
+            r = config.ROW_DATA_START + i
+            ws.write(r, 0, i + 1)
+            ws.write(r, 1, w)
+        wb.save(str(path))
+
+    # ---- 单 run：同一口井两种写法 -> 只新增 1 行 ----
+    tb = tmp / "dup.xls"
+    _write_dup_book(tb)
+    track = TrackBook(tb)
+    idx = {
+        "地质设计": {"卧85": DetailRecord("卧85", "卧85", "地质设计",
+                       config.STATUS_DONE, "2026-01-01", 1, "d.xls", "修井作业")},
+        "工程设计": {"卧85井": DetailRecord("卧85井", "卧85井", "工程设计",
+                       config.STATUS_DONE, "2026-02-02", 1, "e.xls", "修井作业")},
+    }
+    _, info = sync_engine.build_append_actions(track.sheets, idx)
+    eq("同井两种写法只新增 1 行", info["total"], 1)
+    eq("落到修井作业表", list(info["by_sheet"]), ["7.修井作业"])
+    eq("该表只新增 1 口井", info["by_sheet"]["7.修井作业"]["count"], 1)
+
+    # ---- 跨 run：大表已有卧85，明细来卧85井 -> 不新增 ----
+    tb2 = tmp / "dup2.xls"
+    _write_dup_book(tb2, existing=["卧85"])
+    track2 = TrackBook(tb2)
+    idx2 = {"地质设计": {"卧85井": DetailRecord("卧85井", "卧85井", "地质设计",
+                      config.STATUS_DONE, "2026-01-01", 1, "d.xls", "修井作业")}}
+    _, info2 = sync_engine.build_append_actions(track2.sheets, idx2)
+    eq("大表已有卧85，卧85井不再新增", info2["total"], 0)
+
+    # ---- 全半角数字 / 空格 也应归一 ----
+    tb3 = tmp / "dup3.xls"
+    _write_dup_book(tb3)
+    track3 = TrackBook(tb3)
+    idx3 = {
+        "地质设计": {"卧８５": DetailRecord("卧８５", "卧８５", "地质设计",
+                       config.STATUS_DONE, "2026-01-01", 1, "d.xls", "修井作业")},
+        "工程设计": {"卧 85": DetailRecord("卧 85", "卧 85", "工程设计",
+                       config.STATUS_DONE, "2026-02-02", 1, "e.xls", "修井作业")},
+    }
+    _, info3 = sync_engine.build_append_actions(track3.sheets, idx3)
+    eq("全角数字与空格差异也归一为 1 行", info3["total"], 1)
+
+    # ---- 反向：真正不同的井号不应被误并 ----
+    tb4 = tmp / "dup4.xls"
+    _write_dup_book(tb4)
+    track4 = TrackBook(tb4)
+    idx4 = {
+        "地质设计": {"卧85": DetailRecord("卧85", "卧85", "地质设计",
+                       config.STATUS_DONE, "2026-01-01", 1, "d.xls", "修井作业")},
+        "工程设计": {"峰2": DetailRecord("峰2", "峰2", "工程设计",
+                       config.STATUS_DONE, "2026-02-02", 1, "e.xls", "修井作业")},
+    }
+    _, info4 = sync_engine.build_append_actions(track4.sheets, idx4)
+    eq("不同井号仍各自新增（不误并）", info4["total"], 2)
+
+
 # ============================================ L. 全表格式统一（v1.6）
 
 def _write_style_trackbook(path: pathlib.Path) -> None:
-    """造一份「格式五花八门」的大表：无边框 Arial、日期序列号、斜杠日期、数字、合并格。"""
+    """造一份「格式五花八门」的大表：无边框 Arial、日期序列号、斜杠日期、数字、合并格。
+
+    标题/表头刻意用非 10 号字体（20 / 14 / 12 号），用于验证 v1.6.2
+    「只改表头以下内容的字号，标题与表头保持原字号」。
+    """
     wb = xlwt.Workbook(encoding="utf-8")
     ws = wb.add_sheet("7.修井作业")
-    ws.write_merge(0, 0, 0, 3, "井下作业设计节点跟踪表")
-    ws.write(2, 0, "序号")
-    ws.write(2, 1, "井号")
-    ws.write(2, 2, "地质设计")
-    ws.write(2, 3, "备注")
-    ws.write(3, 2, "实际完成")
+    h_title = xlwt.easyxf("font: name 宋体, height 400;")   # 20 号标题
+    h_stage = xlwt.easyxf("font: name 宋体, height 280;")   # 14 号一级表头
+    h_sub = xlwt.easyxf("font: name 宋体, height 240;")     # 12 号二级表头
+    ws.write_merge(0, 0, 0, 3, "井下作业设计节点跟踪表", h_title)
+    ws.write(2, 0, "序号", h_stage)
+    ws.write(2, 1, "井号", h_stage)
+    ws.write(2, 2, "地质设计", h_stage)
+    ws.write(2, 3, "备注", h_stage)
+    ws.write(3, 2, "实际完成", h_sub)
     ws.write(4, 0, 3)                                        # 数字（默认 Arial / 无边框）
     ws.write(4, 1, "卧122")
     ws.write(4, 2, datetime.datetime(2026, 5, 30),
              xlwt.easyxf(num_format_str="YYYY-MM-DD"))     # → Excel 日期序列号
     ws.write(4, 3, "2026/5/30\n（董5同井场）")              # 斜杠日期 + 换行备注
+    ws.write(5, 0, 2, xlwt.easyxf("font: colour_index blue;"))  # 已有蓝色（应保留）
     ws.write(5, 1, "峰2")
     ws.write(5, 3, "2025/3/38")                             # 脏日期，不应被改
     # (5, 2) 留空，供测试里的 Action 写入
     ws.write(6, 1, "历史红字井",
-             xlwt.easyxf("font: colour_index red;"))        # 旧版工具标红 → 应转深蓝
+             xlwt.easyxf("font: colour_index red;"))        # 旧版工具标红 → v1.6.2 起保留原色
     # 第 7 行整行留空，第 8 行再有数据 → 验证「中间整行空白也不断框」
     ws.write(8, 1, "末行井")
     wb.save(str(path))
@@ -1083,6 +1164,8 @@ def test_unify_format(tmp: pathlib.Path) -> None:
     eq("default_cfg 默认铺满整片网格",
        default_cfg()["full_grid_borders"], True)
     eq("config 整片网格常量默认开启", config.UNIFY_FULL_GRID, True)
+    eq("表头字号保留开关默认开启", config.PRESERVE_HEADER_FONT_SIZE, True)
+    eq("历史红字迁移开关默认关闭", config.MIGRATE_LEGACY_RED, False)
 
     src = tmp / "style"
     src.mkdir(parents=True, exist_ok=True)
@@ -1115,10 +1198,22 @@ def test_unify_format(tmp: pathlib.Path) -> None:
     eq("脏日期不被改写", sh.cell_value(5, 3), "2025/3/38")
     eq("plan 写入值也归一为 yyyy-MM-dd", sh.cell_value(5, 2), "2026-12-01")
     eq("plan 写入单元格为深蓝色", _style_of(rb, sh, 5, 2)["color"], 18)
-    eq("历史标红的井号迁移为深蓝色", _style_of(rb, sh, 6, 1)["color"], 18)
+    # v1.6.2：不迁移历史红字，已有颜色一律保留
+    eq("历史红字颜色保留（不再迁移深蓝）", _style_of(rb, sh, 6, 1)["color"], 10)
     eq("历史红字井的值不丢", sh.cell_value(6, 1), "历史红字井")
+    eq("已有蓝色序号颜色保留", _style_of(rb, sh, 5, 0)["color"], 12)
     eq("普通数据仍是黑字（不是工具生成）",
        _style_of(rb, sh, 4, 1)["color"], 32767)
+    # v1.6.2：只改表头以下的字号，标题 / 表头保持原字号
+    eq("标题行字号保持 20 号", _style_of(rb, sh, 0, 0)["height"], 400)
+    eq("一级表头字号保持 14 号", _style_of(rb, sh, 2, 1)["height"], 280)
+    eq("二级表头字号保持 12 号", _style_of(rb, sh, 3, 2)["height"], 240)
+    eq("表头仍统一宋体 + 黑框 + 居中",
+       (_style_of(rb, sh, 2, 1)["font"],
+        _style_of(rb, sh, 2, 1)["borders"],
+        _style_of(rb, sh, 2, 1)["align"]),
+       ("宋体", (1, 1, 1, 1), (2, 1)))
+    eq("数据行字号统一为 10 号", _style_of(rb, sh, 4, 1)["height"], 200)
     eq("plan 写入单元格同为宋体10+黑框+居中",
        (_style_of(rb, sh, 5, 2)["font"],
         _style_of(rb, sh, 5, 2)["height"],
@@ -1126,9 +1221,9 @@ def test_unify_format(tmp: pathlib.Path) -> None:
         _style_of(rb, sh, 5, 2)["align"]),
        ("宋体", 200, (1, 1, 1, 1), (2, 1)))
 
-    # ---- L3. 逐格检查所有非空单元格的字体/边框/对齐 ----
+    # ---- L3. 逐格检查数据行（表头以下）的字体/边框/对齐 ----
     bad = []
-    for r in range(sh.nrows):
+    for r in range(config.ROW_DATA_START, sh.nrows):
         for c in range(sh.ncols):
             if sh.cell_type(r, c) in (xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK):
                 continue
@@ -1140,7 +1235,21 @@ def test_unify_format(tmp: pathlib.Path) -> None:
                     or st["border_colors"] != (8, 8, 8, 8)
                     or st["align"] != (2, 1)):
                 bad.append((r, c, st))
-    eq("所有非空单元格都是宋体10/黑框/水平垂直居中", bad, [])
+    eq("所有数据行都是宋体10/黑框/水平垂直居中", bad, [])
+
+    # ---- L3b. 表头区：格式统一但字号保持原值 ----
+    bad_head = []
+    for r in range(config.ROW_DATA_START):
+        for c in range(sh.ncols):
+            st = _style_of(rb, sh, r, c)
+            if (st["font"] != "宋体" or st["borders"] != (1, 1, 1, 1)
+                    or st["align"] != (2, 1)):
+                bad_head.append((r, c, st))
+    eq("表头区宋体/黑框/居中均已统一", bad_head, [])
+    eq("表头各行字号分别保持 20/14/12 号",
+       (_style_of(rb, sh, 0, 0)["height"],
+        _style_of(rb, sh, 2, 1)["height"],
+        _style_of(rb, sh, 3, 2)["height"]), (400, 280, 240))
 
     # ---- L4. 合并区非锚点空格也有黑框 ----
     eq("合并区内空格带黑框",
@@ -1173,7 +1282,10 @@ def test_unify_format(tmp: pathlib.Path) -> None:
     eq("副本模式日期归一", sh3.cell_value(4, 2), "2026-05-30")
     eq("副本模式字体统一", _style_of(rb3, sh3, 4, 1)["font"], "宋体")
     eq("副本模式本次写入为深蓝", _style_of(rb3, sh3, 5, 2)["color"], 18)
-    eq("副本模式历史红字迁移为深蓝", _style_of(rb3, sh3, 6, 1)["color"], 18)
+    eq("副本模式已有红字颜色保留", _style_of(rb3, sh3, 6, 1)["color"], 10)
+    eq("副本模式已有蓝色保留", _style_of(rb3, sh3, 5, 0)["color"], 12)
+    eq("副本模式标题字号保留", _style_of(rb3, sh3, 0, 0)["height"], 400)
+    eq("副本模式数据行统一 10 号", _style_of(rb3, sh3, 4, 1)["height"], 200)
     eq("副本模式整片网格无断框",
        [(r, c) for r in range(sh3.nrows) for c in range(sh3.ncols)
         if _style_of(rb3, sh3, r, c)["borders"] != (1, 1, 1, 1)], [])
@@ -1242,6 +1354,7 @@ def run_tests() -> bool:
         test_end_to_end(tmp)
         test_phase4_features(tmp)
         test_append_wells(tmp)
+        test_append_no_duplicate_well(tmp)
         test_unify_format(tmp)
     finally:
         pass  # 保留临时目录便于排查，见文末提示

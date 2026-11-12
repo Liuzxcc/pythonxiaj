@@ -15,7 +15,7 @@ import xlrd
 
 from . import config
 from .detail_reader import _cell, find_col
-from .pathutil import canon, nfc, norm_header, safe_path
+from .pathutil import canon, nfc, norm_header, safe_path, well_core
 
 
 def stage_config(stage_key: str):
@@ -65,7 +65,7 @@ class TrackSheet:
             return sh.nrows - 1
         last = config.ROW_DATA_START - 1
         for r in range(config.ROW_DATA_START, sh.nrows):
-            if canon(self.cell(r, cw)):
+            if well_core(self.cell(r, cw)):
                 last = r
         return last
 

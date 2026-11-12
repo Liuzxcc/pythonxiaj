@@ -40,6 +40,32 @@ def canon(s) -> str:
     return s.casefold()
 
 
+# 全角数字 -> 半角数字（如「卧８５」→「卧85」）
+_FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
+
+
+def well_core(s) -> str:
+    """井号主体（强归一比较键）：在 canon 基础上进一步归一，让同一口井的多种
+
+    写法（「卧85」/「卧85井」/「卧 85」/「卧８５」）归为同一 key，避免被当成
+    不同井而重复新增或漏匹配。
+
+    规则：
+        - 全角数字 -> 半角
+        - 去除任意空白（半角/全角/不间断空格、换行/制表）
+        - 去除末尾冗余的「井」「号」字（「卧85井」→「卧85」）
+        - 大小写已因 canon 的 casefold 统一
+    """
+    s = canon(s)
+    if not s:
+        return ""
+    s = s.translate(_FULLWIDTH_DIGITS)
+    s = "".join(s.split())
+    while s and s[-1] in ("井", "号"):
+        s = s[:-1]
+    return s
+
+
 # 表头里的干扰字符：换行、全角空格、NBSP
 _HEADER_NOISE = re.compile(r"[\r\n\t\u3000\xa0]+")
 

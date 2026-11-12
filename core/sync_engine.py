@@ -19,7 +19,7 @@ import datetime
 import re
 
 from . import config
-from .pathutil import canon, nfc
+from .pathutil import canon, nfc, well_core
 
 # 严格日期：YYYY-M-D 或 YYYY/M/D
 _CLEAN_DATE = re.compile(r"^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$")
@@ -172,7 +172,7 @@ def unmatched_detail_wells(track_sheets: list, stage_index: dict) -> dict:
             s = book_wells.setdefault(stage, set())
             sh = ts.sheet
             for r in range(config.ROW_DATA_START, sh.nrows):
-                w = canon(ts.cell(r, cw))
+                w = well_core(ts.cell(r, cw))
                 if w:
                     s.add(w)
 
@@ -316,7 +316,7 @@ def build_append_actions(track_sheets: list, stage_index: dict,
         if cw < 0:
             continue
         for r in range(config.ROW_DATA_START, ts.sheet.nrows):
-            w = canon(ts.cell(r, cw))
+            w = well_core(ts.cell(r, cw))
             if w:
                 book_wells.add(w)
 
@@ -325,7 +325,7 @@ def build_append_actions(track_sheets: list, stage_index: dict,
     by_well: dict[str, dict] = {}
     for stage, well2rec in stage_index.items():
         for well, rec in well2rec.items():
-            wkey = canon(well)
+            wkey = well_core(well)
             if wkey in book_wells:
                 continue
             item = by_well.setdefault(wkey, {"display": rec.well_display, "recs": []})
@@ -442,7 +442,7 @@ def sync_sheet(track_sheet, stage_index: dict,
                 well_disp = track_sheet.cell(r, col_well)
             except IndexError:
                 continue
-            well = canon(well_disp)
+            well = well_core(well_disp)
             if not well:
                 continue
 

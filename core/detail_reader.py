@@ -14,7 +14,7 @@ import xlrd
 
 from . import config
 from .filename_parser import ParsedFile
-from .pathutil import canon, nfc
+from .pathutil import canon, nfc, well_core
 from .sync_engine import DetailRecord
 
 
@@ -99,7 +99,7 @@ def load_detail(pf: ParsedFile) -> list[DetailRecord]:
     out: list[DetailRecord] = []
     for r in range(config.ROW_DETAIL_HEADER + 1, sh.nrows):
         well_disp = _cell(sh, r, col_well)
-        well = canon(well_disp)
+        well = well_core(well_disp)
         if not well:
             continue
         flow = 0

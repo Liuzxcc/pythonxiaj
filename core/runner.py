@@ -14,7 +14,8 @@ cfg 字段:
     stages       参与同步的节点 key 列表（多选过滤），默认全部
     allow_recheck_overwrite  允许"已完成"被"审核中"覆盖
     restructure  是否先执行 sheet 7 列结构调整
-    unify_format 写回时统一全表格式（宋体 10 / 黑框 / 居中 / 日期 yyyy-MM-dd）
+    unify_format 写回时统一表格格式（表头以下宋体 10 / 黑框 / 居中 / 日期 yyyy-MM-dd，
+                 标题与表头行字号保持原值，v1.6.2）
     full_grid_borders 边框铺满整个使用区域矩形（空白格也补黑框）
 """
 
@@ -215,12 +216,15 @@ def _run(cfg: dict, on_log, on_done, on_error):
                     else:
                         on_log("（零新文件模式：未生成备份，原表已直接修改）")
                     if unify:
-                        on_log("（全表格式已统一：宋体 10 号 / 黑色边框 / 水平垂直居中"
-                               " / 日期 yyyy-MM-dd；工具生成的数据为深蓝色）")
+                        head_note = ("标题/表头字号不变" if config.PRESERVE_HEADER_FONT_SIZE
+                                     else "全表 10 号")
+                        on_log("（表格格式已统一：表头以下宋体 10 号 / 黑色边框"
+                               " / 水平垂直居中 / 日期 yyyy-MM-dd；%s；"
+                               "本次由工具写入的数据为深蓝，原有字体颜色不变）" % head_note)
                         if full_grid:
                             on_log("（边框已铺满整片数据区域，空白格也补黑框）")
                     elif kept_format:
-                        on_log("（已保留原表格式，改动单元格标红）")
+                        on_log("（已保留原表格式，改动单元格为深蓝色）")
                     if not kept_format:
                         on_log("⚠ 未能保留原表格式（xlutils 不可用），已用纯 xlwt 重建；请用 WPS 核对。")
                 else:
