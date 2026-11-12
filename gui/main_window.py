@@ -269,6 +269,7 @@ class SyncWindow:
             "append_fallback_on_missing_sheet": False,  # 目标表缺失时跳过并告警
             "append_create_missing_sheet": True,        # 按对照表自动新建缺失的目标表
             "unify_format": True,                       # 全表宋体10/黑框/居中/日期 yyyy-MM-dd
+            "full_grid_borders": True,                  # 边框铺满整片数据区域（空格也补框）
         }
 
         self._running = True

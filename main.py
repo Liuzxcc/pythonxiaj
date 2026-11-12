@@ -70,6 +70,7 @@ def run_cli(args):
     cfg["append_fallback_on_missing_sheet"] = bool(args.append_fallback)
     cfg["append_create_missing_sheet"] = not bool(args.no_create_missing_sheet)
     cfg["unify_format"] = not bool(args.no_unify_format)
+    cfg["full_grid_borders"] = not bool(args.border_data_only)
 
     result = {}
 
@@ -120,6 +121,8 @@ def main():
                         help="关闭「按对照表自动新建缺失的目标 sheet」（默认开启）")
     parser.add_argument("--no-unify-format", action="store_true",
                         help="关闭「全表格式统一」（默认开启：宋体 10 号 / 黑色边框 / 水平垂直居中 / 日期 yyyy-MM-dd）")
+    parser.add_argument("--border-data-only", action="store_true",
+                        help="只给有数据的单元格加边框（默认给整个数据区域的空白格也补黑框）")
     args = parser.parse_args()
 
     if args.cli:

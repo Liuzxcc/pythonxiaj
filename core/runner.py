@@ -15,6 +15,7 @@ cfg 字段:
     allow_recheck_overwrite  允许"已完成"被"审核中"覆盖
     restructure  是否先执行 sheet 7 列结构调整
     unify_format 写回时统一全表格式（宋体 10 / 黑框 / 居中 / 日期 yyyy-MM-dd）
+    full_grid_borders 边框铺满整个使用区域矩形（空白格也补黑框）
 """
 
 from __future__ import annotations
@@ -192,6 +193,7 @@ def _run(cfg: dict, on_log, on_done, on_error):
         backup = synced = kept_format = None
         result_mode = "dry"
         unify = cfg.get("unify_format", config.UNIFY_FORMAT)
+        full_grid = cfg.get("full_grid_borders", config.UNIFY_FULL_GRID)
         if cfg.get("apply"):
             if stat["write"] == 0 and not unify:
                 on_log("没有需要写入的变更，跳过写回。")
@@ -204,7 +206,8 @@ def _run(cfg: dict, on_log, on_done, on_error):
                         track, actions, backup_dir=reports_dir,
                         make_backup=not no_extra,
                         new_sheets=appended.get("new_sheets"),
-                        unify_format=unify)
+                        unify_format=unify,
+                        full_grid=full_grid)
                     synced = src_path
                     on_log("已直接写入原表：%s" % src_path)
                     if backup:
@@ -213,7 +216,9 @@ def _run(cfg: dict, on_log, on_done, on_error):
                         on_log("（零新文件模式：未生成备份，原表已直接修改）")
                     if unify:
                         on_log("（全表格式已统一：宋体 10 号 / 黑色边框 / 水平垂直居中"
-                               " / 日期 yyyy-MM-dd；改动单元格标红）")
+                               " / 日期 yyyy-MM-dd；工具生成的数据为深蓝色）")
+                        if full_grid:
+                            on_log("（边框已铺满整片数据区域，空白格也补黑框）")
                     elif kept_format:
                         on_log("（已保留原表格式，改动单元格标红）")
                     if not kept_format:
@@ -223,7 +228,8 @@ def _run(cfg: dict, on_log, on_done, on_error):
                     synced = write_back(
                         track, actions,
                         out_path=reports_dir / ("井下作业设计节点跟踪大表.synced-%s.xls" % _ts()),
-                        new_sheets=appended.get("new_sheets"))
+                        new_sheets=appended.get("new_sheets"),
+                        full_grid=full_grid)
                     on_log("已生成同步后副本（原表未改动）：%s" % synced)
                     on_log("原表已备份：%s" % backup)
                     on_log("⚠ 副本为 xlwt 重建，合并单元格已复制，条件格式丢失，需核对后手动替换。")
@@ -318,4 +324,5 @@ def default_cfg() -> dict:
         "append_fallback_on_missing_sheet": config.APPEND_FALLBACK_ON_MISSING_SHEET,
         "append_create_missing_sheet": config.APPEND_CREATE_MISSING_SHEET,
         "unify_format": config.UNIFY_FORMAT,
+        "full_grid_borders": config.UNIFY_FULL_GRID,
     }

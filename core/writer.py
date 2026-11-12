@@ -48,10 +48,13 @@ _ALIGN_BORDER = (
     " left_colour black, right_colour black,"
     " top_colour black, bottom_colour black;"
 )
-# 普通单元格：黑字
+# 普通单元格：黑字（人工录入的数据）
 _NORMAL_XF = "font: name 宋体, height 200; " + _ALIGN_BORDER
-# 本次写入/新增的单元格：保留红字标记，其余格式一致
-_CHANGED_XF = "font: name 宋体, height 200, colour_index red; " + _ALIGN_BORDER
+# 报表工具生成的数据：深蓝色（dark_blue = BIFF8 索引 18 / #000080），其余格式一致
+_GENERATED_XF = "font: name 宋体, height 200, colour_index dark_blue; " + _ALIGN_BORDER
+# BIFF8 颜色索引：10=red（v1.6.0 及以前工具写入的标记），18=dark_blue（v1.6.1 起）
+_COLOR_LEGACY_RED = 10
+_COLOR_GENERATED = 18
 # 文本单元格一律强制文本格式，避免日期/自定义数字格式显示异常（(fXt165) 乱码）
 _CHANGED_NUM_FMT = "@"
 
@@ -91,7 +94,7 @@ def normalize_date_text(s) -> str:
 
 
 def _uniform_styles() -> dict:
-    """4 个统一样式：普通/标红 × 文本/数值。
+    """4 个统一样式：普通黑字 / 深蓝(工具生成) × 文本 / 数值。
 
     文本用 num_format_str='@'（避免历史自定义格式在 WPS 显示成 (fXt165)）；
     数值保留数字类型（序号等），用 General 显示，不产生「数字以文本形式存储」绿三角。
@@ -99,8 +102,8 @@ def _uniform_styles() -> dict:
     return {
         "text": xlwt.easyxf(_NORMAL_XF, num_format_str=_CHANGED_NUM_FMT),
         "num": xlwt.easyxf(_NORMAL_XF, num_format_str="General"),
-        "text_red": xlwt.easyxf(_CHANGED_XF, num_format_str=_CHANGED_NUM_FMT),
-        "num_red": xlwt.easyxf(_CHANGED_XF, num_format_str="General"),
+        "text_gen": xlwt.easyxf(_GENERATED_XF, num_format_str=_CHANGED_NUM_FMT),
+        "num_gen": xlwt.easyxf(_GENERATED_XF, num_format_str="General"),
     }
 
 
@@ -129,12 +132,24 @@ def _style_map():
     return {
         "header": s["text"],
         "data": s["text"],
-        "changed": s["text_red"],
+        "changed": s["text_gen"],
         "text": s["text"],
         "num": s["num"],
-        "text_red": s["text_red"],
-        "num_red": s["num_red"],
+        "text_gen": s["text_gen"],
+        "num_gen": s["num_gen"],
     }
+
+
+def _is_generated_font(rb, sh, r: int, c: int) -> bool:
+    """是否「报表工具生成的数据」：v1.6.0 及以前工具写入的单元格标红(索引 10)。
+
+    用它把历史红字一并迁移成深蓝，避免同一张表新旧版本混色。
+    """
+    try:
+        xf = rb.xf_list[sh.cell_xf_index(r, c)]
+        return rb.font_list[xf.font_index].colour_index == _COLOR_LEGACY_RED
+    except Exception:
+        return False
 
 
 def _collect_plan(actions: list[Action]) -> dict[str, dict[tuple[int, int], str]]:
@@ -171,10 +186,13 @@ def _create_sheets(rb, wb, new_sheets: dict, styles=None) -> dict:
         if new_name in existing or tpl_name not in existing:
             continue
         tpl = rb.sheet_by_name(tpl_name)
-        ws = wb.add_sheet(new_name[:31])
+        # 允许覆盖：表头区先铺满带黑框的空格，再由 merge() 重写合并区内空格
+        ws = wb.add_sheet(new_name[:31], cell_overwrite_ok=True)
         for r in range(min(config.ROW_DATA_START, tpl.nrows)):
             for c in range(tpl.ncols):
-                if tpl.cell_type(r, c) in _EMPTY_TYPES:
+                if (tpl.cell_type(r, c) in _EMPTY_TYPES
+                        or tpl.cell_value(r, c) == ""):
+                    ws.write(r, c, "", styles["text"])   # 空格也带黑框
                     continue
                 v, is_text = _cell_output_value(tpl, r, c, rb.datemode)
                 ws.write(r, c, v, styles["text"] if is_text else styles["num"])
@@ -205,20 +223,22 @@ def _ts() -> str:
 
 # ------------------------------------------------------------------ 全表格式统一
 
-def _apply_uniform_style(rb, wb, plan: dict, styles: dict) -> None:
-    """整表所有非空单元格统一格式；同时把 plan 的变更写进去（标红）。
+def _apply_uniform_style(rb, wb, plan: dict, styles: dict,
+                         full_grid: bool = True) -> None:
+    """整表统一格式；同时把 plan 的变更写进去（深蓝）。
 
     在 xlutils.copy 的产物上逐格覆盖（xlutils 已把 cell_overwrite_ok 打开）：
       - 合并单元格数量 / 列宽 / 行高 / 窗格由 xlutils 原样保留；
-      - 合并区非锚点空格也套黑框，保证合并区域四周都有边框；
-      - 新增行（超原表行数）的变更单元格同样会被写出。
+      - full_grid=True 时把「使用区域矩形」内**所有空格**也写成带黑框的空白格，
+        整张表是连续网格，中间不会断框（v1.6.1 用户反馈修正）；
+      - 工具生成的数据（本次 plan 写入 / 历史标红）统一为深蓝色。
     """
     for si, name in enumerate(rb.sheet_names()):
         sh = rb.sheet_by_index(si)
         ws = wb.get_sheet(si)
         changes = plan.get(name, {})
 
-        # 1) 合并区域内部空格补黑框（锚点在 2) 里按有数据单元格处理）
+        # 合并区域非锚点空格：full_grid 关闭时也要补黑框
         for (rlo, rhi, clo, chi) in (getattr(sh, "merged_cells", None) or ()):
             for r in range(rlo, rhi):
                 for c in range(clo, chi):
@@ -229,17 +249,27 @@ def _apply_uniform_style(rb, wb, plan: dict, styles: dict) -> None:
                     except Exception:
                         pass
 
-        # 2) 所有非空单元格 + 新增行的变更单元格
-        for r in range(_plan_max_row(sh, changes)):
+        # 「整个活动表」= xlrd 读到的完整 UsedRange（含尾部预置空格行）+ 新增行。
+        # 不能只画有数据的格子，否则中间整片空白会断框（v1.6.1 用户反馈）。
+        rows = _plan_max_row(sh, changes)
+        for r in range(rows):
             for c in range(sh.ncols):
                 if (r, c) in changes:
+                    # 本次写入 / 新增 → 工具生成，深蓝
                     val = normalize_date_text(str(changes[(r, c)]))
-                    style = styles["text_red"]
+                    style = styles["text_gen"]
                 elif (r < sh.nrows
                       and sh.cell_type(r, c) not in _EMPTY_TYPES
                       and sh.cell_value(r, c) != ""):
                     val, is_text = _cell_output_value(sh, r, c, rb.datemode)
-                    style = styles["text"] if is_text else styles["num"]
+                    if _is_generated_font(rb, sh, r, c):
+                        # 历史版本写入的红字 → 迁移为深蓝
+                        style = styles["text_gen"] if is_text else styles["num_gen"]
+                    else:
+                        style = styles["text"] if is_text else styles["num"]
+                elif full_grid:
+                    # 空白格：写空值 + 黑框，保证整片网格连续
+                    val, style = "", styles["text"]
                 else:
                     continue
                 try:
@@ -248,8 +278,10 @@ def _apply_uniform_style(rb, wb, plan: dict, styles: dict) -> None:
                     pass
 
 
-def _write_plain_sheet(ws, sh, changes: dict, styles: dict, datemode: int) -> None:
-    """纯 xlwt 重建单张 sheet：统一格式 + 日期归一 + 合并格 + 新增行。"""
+def _write_plain_sheet(ws, sh, changes: dict, styles: dict, rb,
+                       full_grid: bool = True) -> None:
+    """纯 xlwt 重建单张 sheet：统一格式 + 整片网格 + 深蓝 + 日期归一 + 合并格。"""
+    datemode = rb.datemode
     merged = getattr(sh, "merged_cells", None) or ()
     covered = set()
     for (rlo, rhi, clo, chi) in merged:
@@ -260,10 +292,13 @@ def _write_plain_sheet(ws, sh, changes: dict, styles: dict, datemode: int) -> No
             continue
         key = (rlo, clo)
         if key in changes:
-            val, style = normalize_date_text(str(changes[key])), styles["text_red"]
+            val, style = normalize_date_text(str(changes[key])), styles["text_gen"]
         elif sh.cell_type(rlo, clo) not in _EMPTY_TYPES:
             val, is_text = _cell_output_value(sh, rlo, clo, datemode)
-            style = styles["text"] if is_text else styles["num"]
+            if _is_generated_font(rb, sh, rlo, clo):
+                style = styles["text_gen"] if is_text else styles["num_gen"]
+            else:
+                style = styles["text"] if is_text else styles["num"]
         else:
             val, style = "", styles["text"]
         try:
@@ -271,18 +306,25 @@ def _write_plain_sheet(ws, sh, changes: dict, styles: dict, datemode: int) -> No
         except Exception:
             pass
 
-    for r in range(_plan_max_row(sh, changes)):
+    # 副本模式同样铺满整个 UsedRange（含尾部预置空格行）+ 新增行
+    rows = _plan_max_row(sh, changes)
+    for r in range(rows):
         for c in range(sh.ncols):
             if (r, c) in covered:
                 continue
             if (r, c) in changes:
                 val = normalize_date_text(str(changes[(r, c)]))
-                style = styles["text_red"]
+                style = styles["text_gen"]
             elif (r < sh.nrows
                   and sh.cell_type(r, c) not in _EMPTY_TYPES
                   and sh.cell_value(r, c) != ""):
                 val, is_text = _cell_output_value(sh, r, c, datemode)
-                style = styles["text"] if is_text else styles["num"]
+                if _is_generated_font(rb, sh, r, c):
+                    style = styles["text_gen"] if is_text else styles["num_gen"]
+                else:
+                    style = styles["text"] if is_text else styles["num"]
+            elif full_grid:
+                val, style = "", styles["text"]
             else:
                 continue
             try:
@@ -297,11 +339,13 @@ def write_inplace(track: TrackBook, actions: list[Action],
                   backup_dir: pathlib.Path | None = None,
                   make_backup: bool = True,
                   new_sheets: dict | None = None,
-                  unify_format: bool = True):
+                  unify_format: bool = True,
+                  full_grid: bool = True):
     """原地写入原表（保留格式）。返回 (原表路径, 备份路径, 是否保格式)。
 
     make_backup=False 时不生成任何备份文件（「真正零新文件」模式）。
     unify_format=True 时顺带统一全表字体/边框/对齐/日期（v1.6 默认）。
+    full_grid=True 时把使用区域矩形内所有空格也加上黑框（v1.6.1 默认）。
     """
     plan = _collect_plan(actions)
     src = pathlib.Path(track.path)
@@ -313,7 +357,8 @@ def write_inplace(track: TrackBook, actions: list[Action],
     try:
         kept_format = _render_preserving(src, plan, tmp,
                                          new_sheets=new_sheets,
-                                         unify_format=unify_format)
+                                         unify_format=unify_format,
+                                         full_grid=full_grid)
         shutil.copystat(src, tmp)          # 保留文件时间/权限
         os.replace(str(tmp), str(src))     # 原子替换：要么整个换掉，要么原表分毫不动
         return src, backup, kept_format
@@ -360,7 +405,8 @@ def _sanitize_num_formats(wb):
 
 def _render_preserving(src: pathlib.Path, plan: dict, dst: pathlib.Path,
                        new_sheets: dict | None = None,
-                       unify_format: bool = True) -> bool:
+                       unify_format: bool = True,
+                       full_grid: bool = True) -> bool:
     """用 xlutils 复制原表并应用变更。成功返回 True（保格式）。
 
     xlutils 不可用、或该 .xls 读不出格式信息、或 xlutils 复制后内部数字格式损坏时，
@@ -372,7 +418,8 @@ def _render_preserving(src: pathlib.Path, plan: dict, dst: pathlib.Path,
         rb = xlrd.open_workbook(str(src), formatting_info=True)
         wb = xl_copy(rb)
     except Exception:
-        _render_plain(src, plan, dst, new_sheets=new_sheets)
+        _render_plain(src, plan, dst, new_sheets=new_sheets,
+                      full_grid=full_grid)
         return False
 
     # 修复 xlutils.copy 偶尔带入的 None 自定义数字格式
@@ -384,10 +431,10 @@ def _render_preserving(src: pathlib.Path, plan: dict, dst: pathlib.Path,
 
     if unify_format:
         # v1.6：整表统一格式 + 日期归一 + 写入变更（一次遍历完成）
-        _apply_uniform_style(rb, wb, plan, styles)
+        _apply_uniform_style(rb, wb, plan, styles, full_grid=full_grid)
     else:
         # 旧行为（--no-unify-format）：只写变更单元格，原有格式一律不动
-        red = styles["text_red"]
+        blue = styles["text_gen"]
         for name, changes in plan.items():
             if not changes:
                 continue
@@ -398,15 +445,30 @@ def _render_preserving(src: pathlib.Path, plan: dict, dst: pathlib.Path,
             else:
                 continue
             for (r, c), v in changes.items():
-                ws.write(r, c, normalize_date_text(str(v)), red)
+                ws.write(r, c, normalize_date_text(str(v)), blue)
 
-    # 新建 sheet 不在 rb.sheet_names() 里，其变更单元格需单独写
+    # 新建 sheet 不在 rb.sheet_names() 里，其变更单元格需单独写；
+    # 数据区空格也补黑框，保持与既有表一致的连续网格
     for name, ws in created.items():
-        for (r, c), v in plan.get(name, {}).items():
+        changes = plan.get(name, {})
+        for (r, c), v in changes.items():
             try:
-                ws.write(r, c, normalize_date_text(str(v)), styles["text_red"])
+                ws.write(r, c, normalize_date_text(str(v)), styles["text_gen"])
             except Exception:
                 pass
+        if unify_format and full_grid:
+            tpl = rb.sheet_by_name(new_sheets[name]) if name in new_sheets else None
+            if tpl is not None:
+                last = max([config.ROW_DATA_START - 1]
+                           + [rr for (rr, _c) in changes])
+                for r in range(config.ROW_DATA_START, last + 1):
+                    for c in range(tpl.ncols):
+                        if (r, c) in changes:
+                            continue
+                        try:
+                            ws.write(r, c, "", styles["text"])
+                        except Exception:
+                            pass
 
     if not unify_format:
         # 统一格式模式下所有非空单元格已用干净格式重写，无需再扫描修复
@@ -415,7 +477,8 @@ def _render_preserving(src: pathlib.Path, plan: dict, dst: pathlib.Path,
     try:
         wb.save(str(dst))
     except Exception:
-        _render_plain(src, plan, dst, new_sheets=new_sheets)
+        _render_plain(src, plan, dst, new_sheets=new_sheets,
+                      full_grid=full_grid)
         return False
     return True
 
@@ -465,7 +528,8 @@ def _write_value(ws, r: int, c: int, val, style) -> None:
 
 
 def _render_plain(src: pathlib.Path, plan: dict, dst: pathlib.Path,
-                  new_sheets: dict | None = None) -> None:
+                  new_sheets: dict | None = None,
+                  full_grid: bool = True) -> None:
     """回退方案：xlwt 从头重建（尽量保留合并单元格；条件格式等仍会丢失）。"""
     try:
         rb = xlrd.open_workbook(str(src), formatting_info=True)
@@ -476,11 +540,25 @@ def _render_plain(src: pathlib.Path, plan: dict, dst: pathlib.Path,
     for name in rb.sheet_names():
         sh = rb.sheet_by_name(name)
         ws = wb.add_sheet(name[:31])
-        _write_plain_sheet(ws, sh, plan.get(name, {}), styles, rb.datemode)
+        _write_plain_sheet(ws, sh, plan.get(name, {}), styles, rb,
+                           full_grid=full_grid)
     created = _create_sheets(rb, wb, new_sheets, styles=styles)
     for name, ws in created.items():
-        for (r, c), v in plan.get(name, {}).items():
-            ws.write(r, c, normalize_date_text(str(v)), styles["text_red"])
+        changes = plan.get(name, {})
+        for (r, c), v in changes.items():
+            ws.write(r, c, normalize_date_text(str(v)), styles["text_gen"])
+        if full_grid:
+            tpl = rb.sheet_by_name(new_sheets[name]) if name in new_sheets else None
+            if tpl is not None:
+                last = max([config.ROW_DATA_START - 1]
+                           + [rr for (rr, _c) in changes])
+                for r in range(config.ROW_DATA_START, last + 1):
+                    for c in range(tpl.ncols):
+                        if (r, c) not in changes:
+                            try:
+                                ws.write(r, c, "", styles["text"])
+                            except Exception:
+                                pass
     wb.save(str(dst))
 
 
@@ -488,7 +566,8 @@ def _render_plain(src: pathlib.Path, plan: dict, dst: pathlib.Path,
 
 def write_back(track: TrackBook, actions: list[Action],
                out_path: pathlib.Path | None = None,
-               new_sheets: dict | None = None) -> pathlib.Path:
+               new_sheets: dict | None = None,
+               full_grid: bool = True) -> pathlib.Path:
     """另存为 .synced-{ts}.xls（原表不动）。返回新文件路径。
 
     用 xlwt 重建；合并单元格按原表复制，条件格式会丢失，仅供核对。
@@ -509,13 +588,27 @@ def write_back(track: TrackBook, actions: list[Action],
         name = ts_.name
         sh = rb.sheet_by_name(name) if name in rb.sheet_names() else ts_.sheet
         ws = wbk.add_sheet(name[:31])
-        _write_plain_sheet(ws, sh, plan.get(name, {}), styles, rb.datemode)
+        _write_plain_sheet(ws, sh, plan.get(name, {}), styles, rb,
+                           full_grid=full_grid)
         for c in range(min(sh.ncols, 30)):
             ws.col(c).width = 14 * 256
     created = _create_sheets(rb, wbk, new_sheets, styles=styles)
     for name, ws in created.items():
-        for (r, c), v in plan.get(name, {}).items():
-            ws.write(r, c, normalize_date_text(str(v)), styles["text_red"])
+        changes = plan.get(name, {})
+        for (r, c), v in changes.items():
+            ws.write(r, c, normalize_date_text(str(v)), styles["text_gen"])
+        if full_grid:
+            tpl = rb.sheet_by_name(new_sheets[name]) if name in new_sheets else None
+            if tpl is not None:
+                last = max([config.ROW_DATA_START - 1]
+                           + [rr for (rr, _c) in changes])
+                for r in range(config.ROW_DATA_START, last + 1):
+                    for c in range(tpl.ncols):
+                        if (r, c) not in changes:
+                            try:
+                                ws.write(r, c, "", styles["text"])
+                            except Exception:
+                                pass
         for c in range(30):
             ws.col(c).width = 14 * 256
     wbk.save(str(out_path))

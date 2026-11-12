@@ -773,7 +773,7 @@ def test_phase4_features(tmp: pathlib.Path) -> None:
     eq("目标单元格已写入新值", sh.cell_value(config.ROW_DATA_START, 2), "2026-03-10")
     xf = sh.cell_xf_index(config.ROW_DATA_START, 2)
     font = after.font_list[after.xf_list[xf].font_index]
-    eq("改动单元格标红", font.colour_index, 10)
+    eq("工具生成的改动单元格为深蓝色", font.colour_index, 18)
     check("已自动生成备份", backup is not None and pathlib.Path(backup).exists(), backup)
 
     # ---- J5. 副本模式（另存 .synced）----
@@ -1029,6 +1029,10 @@ def _write_style_trackbook(path: pathlib.Path) -> None:
     ws.write(5, 1, "峰2")
     ws.write(5, 3, "2025/3/38")                             # 脏日期，不应被改
     # (5, 2) 留空，供测试里的 Action 写入
+    ws.write(6, 1, "历史红字井",
+             xlwt.easyxf("font: colour_index red;"))        # 旧版工具标红 → 应转深蓝
+    # 第 7 行整行留空，第 8 行再有数据 → 验证「中间整行空白也不断框」
+    ws.write(8, 1, "末行井")
     wb.save(str(path))
 
 
@@ -1076,6 +1080,9 @@ def test_unify_format(tmp: pathlib.Path) -> None:
     # ---- L2. 默认开启 + 原地写回 ----
     eq("default_cfg 默认开启统一格式", default_cfg()["unify_format"], True)
     eq("config 常量默认开启", config.UNIFY_FORMAT, True)
+    eq("default_cfg 默认铺满整片网格",
+       default_cfg()["full_grid_borders"], True)
+    eq("config 整片网格常量默认开启", config.UNIFY_FULL_GRID, True)
 
     src = tmp / "style"
     src.mkdir(parents=True, exist_ok=True)
@@ -1107,7 +1114,11 @@ def test_unify_format(tmp: pathlib.Path) -> None:
     eq("序号值不变", sh.cell_value(4, 0), 3.0)
     eq("脏日期不被改写", sh.cell_value(5, 3), "2025/3/38")
     eq("plan 写入值也归一为 yyyy-MM-dd", sh.cell_value(5, 2), "2026-12-01")
-    eq("plan 写入单元格标红", _style_of(rb, sh, 5, 2)["color"], 10)
+    eq("plan 写入单元格为深蓝色", _style_of(rb, sh, 5, 2)["color"], 18)
+    eq("历史标红的井号迁移为深蓝色", _style_of(rb, sh, 6, 1)["color"], 18)
+    eq("历史红字井的值不丢", sh.cell_value(6, 1), "历史红字井")
+    eq("普通数据仍是黑字（不是工具生成）",
+       _style_of(rb, sh, 4, 1)["color"], 32767)
     eq("plan 写入单元格同为宋体10+黑框+居中",
        (_style_of(rb, sh, 5, 2)["font"],
         _style_of(rb, sh, 5, 2)["height"],
@@ -1148,8 +1159,8 @@ def test_unify_format(tmp: pathlib.Path) -> None:
        _style_of(rb2, sh2, 4, 1)["font"] != "宋体", True)
     eq("关闭开关后日期序列号仍存在",
        sh2.cell_type(4, 2), xlrd.XL_CELL_DATE)
-    eq("关闭开关后变更单元格仍标红",
-       _style_of(rb2, sh2, 5, 2)["color"], 10)
+    eq("关闭开关后变更单元格仍为深蓝色",
+       _style_of(rb2, sh2, 5, 2)["color"], 18)
 
     # ---- L6. 副本模式同样统一格式，且不再丢合并格 ----
     p3 = src / "copy_src.xls"
@@ -1161,6 +1172,11 @@ def test_unify_format(tmp: pathlib.Path) -> None:
     eq("副本模式合并格已保留", len(sh3.merged_cells), 1)
     eq("副本模式日期归一", sh3.cell_value(4, 2), "2026-05-30")
     eq("副本模式字体统一", _style_of(rb3, sh3, 4, 1)["font"], "宋体")
+    eq("副本模式本次写入为深蓝", _style_of(rb3, sh3, 5, 2)["color"], 18)
+    eq("副本模式历史红字迁移为深蓝", _style_of(rb3, sh3, 6, 1)["color"], 18)
+    eq("副本模式整片网格无断框",
+       [(r, c) for r in range(sh3.nrows) for c in range(sh3.ncols)
+        if _style_of(rb3, sh3, r, c)["borders"] != (1, 1, 1, 1)], [])
 
     # ---- L7. 幂等：再跑一次值不再变化 ----
     before_vals = {(r, c): sh.cell_value(r, c)
@@ -1174,6 +1190,37 @@ def test_unify_format(tmp: pathlib.Path) -> None:
     eq("重跑不产生乱码格式",
        any("(fmt" in (rb4.format_map[x.format_key].format_str or "")
            for x in rb4.xf_list), False)
+
+    # ---- L8. 整片网格：中间空白行 / 空白格也必须有黑框 ----
+    eq("使用区域行数覆盖到最后一个有数据的行", sh.nrows, 9)
+    unbordered = []
+    for r in range(sh.nrows):
+        for c in range(sh.ncols):
+            st = _style_of(rb, sh, r, c)
+            if st["borders"] != (1, 1, 1, 1):
+                unbordered.append((r, c, st["borders"]))
+    eq("整片数据区域无任何断框（含全部空白格）", unbordered, [])
+    eq("中间整行空白第 7 行仍带黑框",
+       [_style_of(rb, sh, 7, c)["borders"] for c in range(sh.ncols)],
+       [(1, 1, 1, 1)] * sh.ncols)
+    eq("空白格仍为空值", sh.cell_value(7, 0), "")
+    eq("空白格的字体/对齐也统一",
+       (_style_of(rb, sh, 7, 0)["font"], _style_of(rb, sh, 7, 0)["align"]),
+       ("宋体", (2, 1)))
+
+    # ---- L9. --border-data-only 回到 v1.6.0 的「只给有数据的格子加框」 ----
+    p5 = src / "grid_off.xls"
+    _write_style_trackbook(p5)
+    write_inplace(TrackBook(p5), [act], make_backup=False,
+                  unify_format=True, full_grid=False)
+    rb5 = xlrd.open_workbook(str(p5), formatting_info=True)
+    sh5 = rb5.sheet_by_index(0)
+    eq("关闭整片网格后，中间空行不带框",
+       _style_of(rb5, sh5, 7, 0)["borders"], (0, 0, 0, 0))
+    eq("关闭整片网格后，有数据单元格仍带框",
+       _style_of(rb5, sh5, 4, 1)["borders"], (1, 1, 1, 1))
+    eq("关闭整片网格后，合并区空格仍带框",
+       _style_of(rb5, sh5, 0, 2)["borders"], (1, 1, 1, 1))
 
 
 # ================================================================ 主流程
