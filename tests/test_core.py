@@ -1009,6 +1009,173 @@ def test_append_wells(tmp: pathlib.Path) -> None:
     eq("新建表后重跑不再新增（幂等）", info9b["total"], 0)
 
 
+# ============================================ L. 全表格式统一（v1.6）
+
+def _write_style_trackbook(path: pathlib.Path) -> None:
+    """造一份「格式五花八门」的大表：无边框 Arial、日期序列号、斜杠日期、数字、合并格。"""
+    wb = xlwt.Workbook(encoding="utf-8")
+    ws = wb.add_sheet("7.修井作业")
+    ws.write_merge(0, 0, 0, 3, "井下作业设计节点跟踪表")
+    ws.write(2, 0, "序号")
+    ws.write(2, 1, "井号")
+    ws.write(2, 2, "地质设计")
+    ws.write(2, 3, "备注")
+    ws.write(3, 2, "实际完成")
+    ws.write(4, 0, 3)                                        # 数字（默认 Arial / 无边框）
+    ws.write(4, 1, "卧122")
+    ws.write(4, 2, datetime.datetime(2026, 5, 30),
+             xlwt.easyxf(num_format_str="YYYY-MM-DD"))     # → Excel 日期序列号
+    ws.write(4, 3, "2026/5/30\n（董5同井场）")              # 斜杠日期 + 换行备注
+    ws.write(5, 1, "峰2")
+    ws.write(5, 3, "2025/3/38")                             # 脏日期，不应被改
+    # (5, 2) 留空，供测试里的 Action 写入
+    wb.save(str(path))
+
+
+def _style_of(rb, sh, r: int, c: int) -> dict:
+    xf = rb.xf_list[sh.cell_xf_index(r, c)]
+    fo = rb.font_list[xf.font_index]
+    bd = xf.border
+    al = xf.alignment
+    return {
+        "font": fo.name,
+        "height": fo.height,
+        "color": fo.colour_index,
+        "borders": (bd.left_line_style, bd.right_line_style,
+                    bd.top_line_style, bd.bottom_line_style),
+        "border_colors": (bd.left_colour_index, bd.right_colour_index,
+                          bd.top_colour_index, bd.bottom_colour_index),
+        "align": (al.hor_align, al.vert_align),
+        "fmt": rb.format_map[xf.format_key].format_str,
+    }
+
+
+def test_unify_format(tmp: pathlib.Path) -> None:
+    section("L. 全表格式统一（v1.6）")
+    import xlrd
+    from core.runner import default_cfg
+    from core.writer import normalize_date_text, write_back, write_inplace
+
+    # ---- L1. 日期文本归一化 ----
+    eq("斜杠日期 → yyyy-MM-dd", normalize_date_text("2026/5/30"), "2026-05-30")
+    eq("短横线单位数日期补零", normalize_date_text("2025-1-2"), "2025-01-02")
+    eq("点分日期", normalize_date_text("2026.11.3"), "2026-11-03")
+    eq("中文年月日", normalize_date_text("2026年5月3日"), "2026-05-03")
+    eq("保留换行备注", normalize_date_text("2026/5/30\n（董5同井场）"),
+       "2026-05-30\n（董5同井场）")
+    eq("多个日期逐个归一", normalize_date_text("2025/6/19\n2025/7/23"),
+       "2025-06-19\n2025-07-23")
+    eq("去掉内嵌换行+时间", normalize_date_text("2026-08-26\n\t\t09:05:39"),
+       "2026-08-26")
+    eq("非日期文本不动", normalize_date_text("张三（审核中）"), "张三（审核中）")
+    eq("井号不动", normalize_date_text("卧122"), "卧122")
+    eq("脏日历日期不改写", normalize_date_text("2025/3/38"), "2025/3/38")
+    eq("纯数字不误判为日期", normalize_date_text("45967.0"), "45967.0")
+    eq("空串安全", normalize_date_text(""), "")
+
+    # ---- L2. 默认开启 + 原地写回 ----
+    eq("default_cfg 默认开启统一格式", default_cfg()["unify_format"], True)
+    eq("config 常量默认开启", config.UNIFY_FORMAT, True)
+
+    src = tmp / "style"
+    src.mkdir(parents=True, exist_ok=True)
+    p = src / "style.xls"
+    _write_style_trackbook(p)
+    rb0 = xlrd.open_workbook(str(p), formatting_info=True)
+    eq("造表：日期单元格是 Excel 序列号",
+       rb0.sheet_by_index(0).cell_type(4, 2), xlrd.XL_CELL_DATE)
+    eq("造表：合并格 1 个", len(rb0.sheet_by_index(0).merged_cells), 1)
+    eq("造表：原字体不是宋体",
+       _style_of(rb0, rb0.sheet_by_index(0), 4, 1)["font"] != "宋体", True)
+
+    track = TrackBook(p)
+    act = Action(well="峰2", well_display="峰2", sheet="7.修井作业",
+                 row=6, stage="地质设计", target_col=2, old_value="",
+                 new_value="2026/12/1", action="write", reason="test")
+    _s, _b, kept = write_inplace(track, [act], make_backup=False,
+                                 unify_format=True)
+    eq("原地写入保留格式", kept, True)
+
+    rb = xlrd.open_workbook(str(p), formatting_info=True)
+    sh = rb.sheet_by_index(0)
+    eq("合并格数量不变", len(sh.merged_cells), 1)
+    eq("日期序列号已转为文本", sh.cell_type(4, 2), xlrd.XL_CELL_TEXT)
+    eq("日期序列号 → yyyy-MM-dd", sh.cell_value(4, 2), "2026-05-30")
+    eq("斜杠日期归一且保留备注换行", sh.cell_value(4, 3),
+       "2026-05-30\n（董5同井场）")
+    eq("序号仍保持数字类型", sh.cell_type(4, 0), xlrd.XL_CELL_NUMBER)
+    eq("序号值不变", sh.cell_value(4, 0), 3.0)
+    eq("脏日期不被改写", sh.cell_value(5, 3), "2025/3/38")
+    eq("plan 写入值也归一为 yyyy-MM-dd", sh.cell_value(5, 2), "2026-12-01")
+    eq("plan 写入单元格标红", _style_of(rb, sh, 5, 2)["color"], 10)
+    eq("plan 写入单元格同为宋体10+黑框+居中",
+       (_style_of(rb, sh, 5, 2)["font"],
+        _style_of(rb, sh, 5, 2)["height"],
+        _style_of(rb, sh, 5, 2)["borders"],
+        _style_of(rb, sh, 5, 2)["align"]),
+       ("宋体", 200, (1, 1, 1, 1), (2, 1)))
+
+    # ---- L3. 逐格检查所有非空单元格的字体/边框/对齐 ----
+    bad = []
+    for r in range(sh.nrows):
+        for c in range(sh.ncols):
+            if sh.cell_type(r, c) in (xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK):
+                continue
+            if sh.cell_value(r, c) == "":
+                continue
+            st = _style_of(rb, sh, r, c)
+            if (st["font"] != "宋体" or st["height"] != 200
+                    or st["borders"] != (1, 1, 1, 1)
+                    or st["border_colors"] != (8, 8, 8, 8)
+                    or st["align"] != (2, 1)):
+                bad.append((r, c, st))
+    eq("所有非空单元格都是宋体10/黑框/水平垂直居中", bad, [])
+
+    # ---- L4. 合并区非锚点空格也有黑框 ----
+    eq("合并区内空格带黑框",
+       _style_of(rb, sh, 0, 2)["borders"], (1, 1, 1, 1))
+
+    # ---- L5. 关闭开关：只改变更单元格，其它格式不动 ----
+    p2 = src / "no_unify.xls"
+    _write_style_trackbook(p2)
+    track2 = TrackBook(p2)
+    _s2, _b2, kept2 = write_inplace(track2, [act], make_backup=False,
+                                    unify_format=False)
+    eq("关闭开关后仍保留格式", kept2, True)
+    rb2 = xlrd.open_workbook(str(p2), formatting_info=True)
+    sh2 = rb2.sheet_by_index(0)
+    eq("关闭开关后原字体不变",
+       _style_of(rb2, sh2, 4, 1)["font"] != "宋体", True)
+    eq("关闭开关后日期序列号仍存在",
+       sh2.cell_type(4, 2), xlrd.XL_CELL_DATE)
+    eq("关闭开关后变更单元格仍标红",
+       _style_of(rb2, sh2, 5, 2)["color"], 10)
+
+    # ---- L6. 副本模式同样统一格式，且不再丢合并格 ----
+    p3 = src / "copy_src.xls"
+    _write_style_trackbook(p3)
+    out = src / "copy_out.xls"
+    write_back(TrackBook(p3), [act], out_path=out)
+    rb3 = xlrd.open_workbook(str(out), formatting_info=True)
+    sh3 = rb3.sheet_by_index(0)
+    eq("副本模式合并格已保留", len(sh3.merged_cells), 1)
+    eq("副本模式日期归一", sh3.cell_value(4, 2), "2026-05-30")
+    eq("副本模式字体统一", _style_of(rb3, sh3, 4, 1)["font"], "宋体")
+
+    # ---- L7. 幂等：再跑一次值不再变化 ----
+    before_vals = {(r, c): sh.cell_value(r, c)
+                   for r in range(sh.nrows) for c in range(sh.ncols)}
+    write_inplace(TrackBook(p), [], make_backup=False, unify_format=True)
+    rb4 = xlrd.open_workbook(str(p), formatting_info=True)
+    sh4 = rb4.sheet_by_index(0)
+    after_vals = {(r, c): sh4.cell_value(r, c)
+                  for r in range(sh4.nrows) for c in range(sh4.ncols)}
+    eq("重跑值不变（幂等）", after_vals, before_vals)
+    eq("重跑不产生乱码格式",
+       any("(fmt" in (rb4.format_map[x.format_key].format_str or "")
+           for x in rb4.xf_list), False)
+
+
 # ================================================================ 主流程
 
 def run_tests() -> bool:
@@ -1028,6 +1195,7 @@ def run_tests() -> bool:
         test_end_to_end(tmp)
         test_phase4_features(tmp)
         test_append_wells(tmp)
+        test_unify_format(tmp)
     finally:
         pass  # 保留临时目录便于排查，见文末提示
 

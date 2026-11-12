@@ -268,6 +268,7 @@ class SyncWindow:
             "append_missing_wells": True,              # 按措施类别自动补井号行
             "append_fallback_on_missing_sheet": False,  # 目标表缺失时跳过并告警
             "append_create_missing_sheet": True,        # 按对照表自动新建缺失的目标表
+            "unify_format": True,                       # 全表宋体10/黑框/居中/日期 yyyy-MM-dd
         }
 
         self._running = True

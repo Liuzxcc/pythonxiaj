@@ -14,6 +14,7 @@ cfg 字段:
     stages       参与同步的节点 key 列表（多选过滤），默认全部
     allow_recheck_overwrite  允许"已完成"被"审核中"覆盖
     restructure  是否先执行 sheet 7 列结构调整
+    unify_format 写回时统一全表格式（宋体 10 / 黑框 / 居中 / 日期 yyyy-MM-dd）
 """
 
 from __future__ import annotations
@@ -190,25 +191,32 @@ def _run(cfg: dict, on_log, on_done, on_error):
         # ---- 6. 写回 ----
         backup = synced = kept_format = None
         result_mode = "dry"
+        unify = cfg.get("unify_format", config.UNIFY_FORMAT)
         if cfg.get("apply"):
-            if stat["write"] == 0:
+            if stat["write"] == 0 and not unify:
                 on_log("没有需要写入的变更，跳过写回。")
             else:
+                if stat["write"] == 0:
+                    on_log("没有数据变更；本次仅统一全表格式。")
                 result_mode = "inplace" if cfg.get("inplace", True) else "copy"
                 if result_mode == "inplace":
                     src_path, backup, kept_format = write_inplace(
                         track, actions, backup_dir=reports_dir,
                         make_backup=not no_extra,
-                        new_sheets=appended.get("new_sheets"))
+                        new_sheets=appended.get("new_sheets"),
+                        unify_format=unify)
                     synced = src_path
                     on_log("已直接写入原表：%s" % src_path)
                     if backup:
                         on_log("原表已自动备份：%s" % backup)
                     else:
                         on_log("（零新文件模式：未生成备份，原表已直接修改）")
-                    if kept_format:
-                        on_log("（已保留合并单元格/字体/边框等原表格式，改动单元格标红）")
-                    else:
+                    if unify:
+                        on_log("（全表格式已统一：宋体 10 号 / 黑色边框 / 水平垂直居中"
+                               " / 日期 yyyy-MM-dd；改动单元格标红）")
+                    elif kept_format:
+                        on_log("（已保留原表格式，改动单元格标红）")
+                    if not kept_format:
                         on_log("⚠ 未能保留原表格式（xlutils 不可用），已用纯 xlwt 重建；请用 WPS 核对。")
                 else:
                     backup = track.backup()
@@ -218,7 +226,7 @@ def _run(cfg: dict, on_log, on_done, on_error):
                         new_sheets=appended.get("new_sheets"))
                     on_log("已生成同步后副本（原表未改动）：%s" % synced)
                     on_log("原表已备份：%s" % backup)
-                    on_log("⚠ 副本为 xlwt 重建，合并单元格/条件格式丢失，需核对后手动替换。")
+                    on_log("⚠ 副本为 xlwt 重建，合并单元格已复制，条件格式丢失，需核对后手动替换。")
         else:
             on_log("试运行模式：未修改任何文件。勾选『实际写入』才会写回。")
 
@@ -309,4 +317,5 @@ def default_cfg() -> dict:
         "append_missing_wells": config.APPEND_MISSING_WELLS,
         "append_fallback_on_missing_sheet": config.APPEND_FALLBACK_ON_MISSING_SHEET,
         "append_create_missing_sheet": config.APPEND_CREATE_MISSING_SHEET,
+        "unify_format": config.UNIFY_FORMAT,
     }

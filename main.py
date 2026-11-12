@@ -69,6 +69,7 @@ def run_cli(args):
     cfg["append_missing_wells"] = not bool(args.no_append_missing_wells)
     cfg["append_fallback_on_missing_sheet"] = bool(args.append_fallback)
     cfg["append_create_missing_sheet"] = not bool(args.no_create_missing_sheet)
+    cfg["unify_format"] = not bool(args.no_unify_format)
 
     result = {}
 
@@ -117,6 +118,8 @@ def main():
                         help="目标 sheet 不存在时，回退到表名含「修井作业」的表（默认跳过并告警）")
     parser.add_argument("--no-create-missing-sheet", action="store_true",
                         help="关闭「按对照表自动新建缺失的目标 sheet」（默认开启）")
+    parser.add_argument("--no-unify-format", action="store_true",
+                        help="关闭「全表格式统一」（默认开启：宋体 10 号 / 黑色边框 / 水平垂直居中 / 日期 yyyy-MM-dd）")
     args = parser.parse_args()
 
     if args.cli:
