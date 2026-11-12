@@ -64,6 +64,53 @@ def _write_value(ws, r: int, c: int, val, style) -> None:
         ws.write(r, c, val, style)
 
 
+def _plan_max_row(sh, changes: dict) -> int:
+    """写回时需要遍历的行数：原表行数与「新增行」行号二者取大。"""
+    if not changes:
+        return sh.nrows
+    return max(sh.nrows, max(r for (r, _c) in changes) + 1)
+
+
+def _create_sheets(rb, wb, new_sheets: dict, styles=None) -> dict:
+    """按模板表的表头结构新建 sheet，返回 {新表名: xlwt worksheet}。
+
+    用于「对照表声明了某类目标表、但大表里没有」的场景。
+    只复制表头区（R0 ~ ROW_DATA_START-1）的文本与合并格，数据行留空，
+    列结构与模板一致，因此 locate()/well_col() 等按表头定位的逻辑照样可用。
+
+    注意：xlrd 的 merged_cells 是半开区间 (rlo, rhi, clo, chi)，
+    而 xlwt.merge 用闭区间，故需 -1。
+    """
+    styles = styles or _style_map()
+    existing = set(rb.sheet_names())
+    created: dict = {}
+    for new_name, tpl_name in (new_sheets or {}).items():
+        if new_name in existing or tpl_name not in existing:
+            continue
+        tpl = rb.sheet_by_name(tpl_name)
+        ws = wb.add_sheet(new_name[:31])
+        for r in range(min(config.ROW_DATA_START, tpl.nrows)):
+            for c in range(tpl.ncols):
+                v = tpl.cell_value(r, c)
+                if tpl.cell_type(r, c) == 3:      # XL_CELL_DATE
+                    try:
+                        v = xlrd_date_to_str(v)
+                    except Exception:
+                        v = str(v)
+                _write_value(ws, r, c, v,
+                             styles["header"] if r >= 2 else styles["data"])
+        merged = getattr(tpl, "merged_cells", None) or ()
+        for (r1, r2, c1, c2) in merged:
+            if r1 >= config.ROW_DATA_START:
+                continue
+            try:
+                ws.merge(r1, r2 - 1, c1, c2 - 1)
+            except Exception:
+                pass
+        created[new_name] = ws
+    return created
+
+
 def xlrd_date_to_str(v) -> str:
     """xlrd 日期序列号 → 'YYYY-MM-DD'。"""
     dt = xlrd.xldate_as_datetime(v, 0)
@@ -80,7 +127,8 @@ def _ts() -> str:
 
 def write_inplace(track: TrackBook, actions: list[Action],
                   backup_dir: pathlib.Path | None = None,
-                  make_backup: bool = True):
+                  make_backup: bool = True,
+                  new_sheets: dict | None = None):
     """原地写入原表（保留格式）。返回 (原表路径, 备份路径, 是否保格式)。
 
     make_backup=False 时不生成任何备份文件（「真正零新文件」模式）。
@@ -93,7 +141,7 @@ def write_inplace(track: TrackBook, actions: list[Action],
 
     tmp = src.with_name("%s.tmp-%s.xls" % (src.stem, _ts()))
     try:
-        kept_format = _render_preserving(src, plan, tmp)
+        kept_format = _render_preserving(src, plan, tmp, new_sheets=new_sheets)
         shutil.copystat(src, tmp)          # 保留文件时间/权限
         import os
         os.replace(str(tmp), str(src))     # 原子替换：要么整个换掉，要么原表分毫不动
@@ -139,7 +187,8 @@ def _sanitize_num_formats(wb):
             nf[new_str] = idx
 
 
-def _render_preserving(src: pathlib.Path, plan: dict, dst: pathlib.Path) -> bool:
+def _render_preserving(src: pathlib.Path, plan: dict, dst: pathlib.Path,
+                       new_sheets: dict | None = None) -> bool:
     """用 xlutils 复制原表并应用变更。成功返回 True（保格式）。
 
     xlutils 不可用、或该 .xls 读不出格式信息、或 xlutils 复制后内部数字格式损坏时，
@@ -158,11 +207,17 @@ def _render_preserving(src: pathlib.Path, plan: dict, dst: pathlib.Path) -> bool
     _sanitize_num_formats(wb)
 
     red = xlwt.easyxf(_CHANGED_XF, num_format_str=_CHANGED_NUM_FMT)
-    for idx, name in enumerate(rb.sheet_names()):
-        changes = plan.get(name)
+    created = _create_sheets(rb, wb, new_sheets)
+    names = rb.sheet_names()
+    for name, changes in plan.items():
         if not changes:
             continue
-        ws = wb.get_sheet(idx)
+        if name in created:
+            ws = created[name]
+        elif name in names:
+            ws = wb.get_sheet(names.index(name))
+        else:
+            continue
         for (r, c), v in changes.items():
             _write_value(ws, r, c, v, red)
 
@@ -211,7 +266,8 @@ def _repair_cells_with_bad_format(rb, wb, style):
         pass
 
 
-def _render_plain(src: pathlib.Path, plan: dict, dst: pathlib.Path) -> None:
+def _render_plain(src: pathlib.Path, plan: dict, dst: pathlib.Path,
+                  new_sheets: dict | None = None) -> None:
     """回退方案：xlwt 从头重建（会丢失合并单元格与条件格式）。"""
     rb = xlrd.open_workbook(str(src), formatting_info=False)
     styles = _style_map()
@@ -220,11 +276,11 @@ def _render_plain(src: pathlib.Path, plan: dict, dst: pathlib.Path) -> None:
         sh = rb.sheet_by_name(name)
         ws = wb.add_sheet(name[:31])
         changes = plan.get(name, {})
-        for r in range(sh.nrows):
+        for r in range(_plan_max_row(sh, changes)):
             for c in range(sh.ncols):
                 if (r, c) in changes:
                     _write_value(ws, r, c, changes[(r, c)], styles["changed"])
-                else:
+                elif r < sh.nrows:               # 新增行：其余单元格留空
                     v = sh.cell_value(r, c)
                     if sh.cell_type(r, c) == 3:      # XL_CELL_DATE
                         try:
@@ -234,13 +290,18 @@ def _render_plain(src: pathlib.Path, plan: dict, dst: pathlib.Path) -> None:
                     _write_value(ws, r, c, v,
                                  styles["header"] if r < config.ROW_DATA_START
                                  else styles["data"])
+    created = _create_sheets(rb, wb, new_sheets, styles=styles)
+    for name, ws in created.items():
+        for (r, c), v in plan.get(name, {}).items():
+            _write_value(ws, r, c, v, styles["changed"])
     wb.save(str(dst))
 
 
 # ------------------------------------------------------------------ 另存副本
 
 def write_back(track: TrackBook, actions: list[Action],
-               out_path: pathlib.Path | None = None) -> pathlib.Path:
+               out_path: pathlib.Path | None = None,
+               new_sheets: dict | None = None) -> pathlib.Path:
     """另存为 .synced-{ts}.xls（原表不动）。返回新文件路径。
 
     ⚠️ 用 xlwt 重建，合并单元格/条件格式会丢失，仅供核对。
@@ -257,13 +318,13 @@ def write_back(track: TrackBook, actions: list[Action],
         ws = wbk.add_sheet(ts_.name[:31])
         sh = ts_.sheet
         changes = plan.get(ts_.name, {})
-        for r in range(sh.nrows):
+        for r in range(_plan_max_row(sh, changes)):
             for c in range(sh.ncols):
                 if (r, c) in changes:
                     _write_value(ws, r, c, changes[(r, c)],
                                  styles["changed"] if r >= config.ROW_DATA_START
                                  else styles["header"])
-                else:
+                elif r < sh.nrows:               # 新增行：其余单元格留空
                     v = sh.cell_value(r, c)
                     if sh.cell_type(r, c) == 3:
                         try:
@@ -274,6 +335,12 @@ def write_back(track: TrackBook, actions: list[Action],
                                  styles["header"] if r < config.ROW_DATA_START
                                  else styles["data"])
         for c in range(min(sh.ncols, 30)):
+            ws.col(c).width = 14 * 256
+    created = _create_sheets(track.book, wbk, new_sheets, styles=styles)
+    for name, ws in created.items():
+        for (r, c), v in plan.get(name, {}).items():
+            _write_value(ws, r, c, v, styles["changed"])
+        for c in range(30):
             ws.col(c).width = 14 * 256
     wbk.save(str(out_path))
     return out_path

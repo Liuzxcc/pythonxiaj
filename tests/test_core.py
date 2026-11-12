@@ -788,6 +788,227 @@ def test_phase4_features(tmp: pathlib.Path) -> None:
        rb.sheet_by_name("6.上试井").cell_value(config.ROW_DATA_START, 2), "2026-03-10")
 
 
+# ================================================== K. 按措施类别自动新增井号行
+
+_APPEND_SHEETS = ["6.上试井", "7.修井作业", "8.封堵井", "9.井口整改"]
+
+
+def _write_append_trackbook(path: pathlib.Path, sheets=None,
+                            with_map=None) -> None:
+    """造一份带「序号」列的跟踪大表（每个 sheet 一行已有数据 + 1 个合并格）。
+
+    with_map 不为空时额外造一张「对照表」sheet（规则随大表走）。
+    """
+    sheets = sheets if sheets is not None else _APPEND_SHEETS
+    wb = xlwt.Workbook(encoding="utf-8")
+    head_xf = xlwt.easyxf("font: bold on; align: wrap on, vert center, horiz center;")
+    h1 = ["序号", "井号", "作业类型", "地质设计", "", "工程设计", "", "备注"]
+    h2 = ["", "", "", "计划完成", "实际完成", "计划完成", "实际完成", ""]
+    for name in sheets:
+        ws = wb.add_sheet(name)
+        ws.write_merge(0, 0, 0, 7, "测试表标题")   # 合并格，验证写回后仍保留
+        for c, v in enumerate(h1):
+            ws.write(config.ROW_STAGE_HEADER, c, v, head_xf)
+        for c, v in enumerate(h2):
+            ws.write(config.ROW_SUB_HEADER, c, v, head_xf)
+        for c, v in enumerate([1, "卧122", "已有井", "", "", "", "", ""]):
+            if v != "":
+                ws.write(config.ROW_DATA_START, c, v)
+    if with_map:
+        ws = wb.add_sheet("对照表")
+        for r, row in enumerate(with_map):
+            for c, v in enumerate(row):
+                ws.write(r, c, v)
+    wb.save(str(path))
+
+
+def _append_index() -> dict:
+    """造 stage_index：4 口待新增井（4 类措施）+ 1 口大表已有的井。"""
+    return {
+        "地质设计": {
+            "井A": DetailRecord("井A", "井A", "地质设计", config.STATUS_DONE,
+                                "2026-01-01", 3, "d.xls", "永久性封井"),
+            "井B": DetailRecord("井B", "井B", "地质设计", config.STATUS_DONE,
+                                "2026-02-02", 1, "d.xls", "老井回采"),
+            "井D": DetailRecord("井D", "井D", "地质设计", config.STATUS_REVIEW,
+                                "张三", 0, "r.xls", "更换管柱"),
+            "卧122": DetailRecord("卧122", "卧122", "地质设计", config.STATUS_DONE,
+                                  "2025-01-01", 1, "d.xls", "永久性封井"),
+        },
+        "工程设计": {
+            "井C": DetailRecord("井C", "井C", "工程设计", config.STATUS_DONE,
+                                "2026-03-03", 2, "e.xls", "一类井口整改"),
+        },
+    }
+
+
+def test_append_wells(tmp: pathlib.Path) -> None:
+    import xlrd  # noqa: F401  (局部引入，避免影响其它分组)
+
+    section("K. 按措施类别自动新增井号行")
+
+    # ---- K1. 措施类别 → 目标表关键字 ----
+    eq("永久性封井 → 封堵井",
+       sync_engine.measure_sheet_keyword("永久性封井"), "封堵井")
+    eq("老井回采 → 上试井",
+       sync_engine.measure_sheet_keyword("老井回采"), "上试井")
+    eq("一类井口整改 → 井口整改",
+       sync_engine.measure_sheet_keyword("一类井口整改"), "井口整改")
+    eq("更换管柱 → 修井作业（兜底）",
+       sync_engine.measure_sheet_keyword("更换管柱"), "修井作业")
+    eq("空措施类别 → 修井作业（兜底）",
+       sync_engine.measure_sheet_keyword(""), "修井作业")
+
+    # ---- K2. 分表新增 ----
+    src = tmp / "append"
+    src.mkdir(parents=True, exist_ok=True)
+    tb = src / "井下作业设计节点跟踪大表.xls"
+    _write_append_trackbook(tb)
+    track = TrackBook(tb)
+    idx = _append_index()
+
+    acts, info = sync_engine.build_append_actions(track.sheets, idx)
+    eq("新增 4 口井（卧122 已存在，不新增）", info["total"], 4)
+    eq("分别落到 4 张表", sorted(info["by_sheet"]), sorted(_APPEND_SHEETS))
+    eq("卧122 没有新增动作",
+       any(a.well_display == "卧122" for a in acts), False)
+
+    by_sheet: dict[str, list] = {}
+    for a in acts:
+        by_sheet.setdefault(a.sheet, []).append(a)
+    eq("每张表只写 3 个单元格（序号/井号/完成时间）",
+       {k: len(v) for k, v in by_sheet.items()},
+       {k: 3 for k in _APPEND_SHEETS})
+
+    amap = {(a.sheet, a.target_col): a for a in acts}
+    eq("封堵井 新行序号续为 2", amap[("8.封堵井", 0)].new_value, "2")
+    eq("封堵井 新行井号 = 井A", amap[("8.封堵井", 1)].new_value, "井A")
+    eq("封堵井 地质设计完成时间 = 2026-01-01",
+       amap[("8.封堵井", 4)].new_value, "2026-01-01")
+    eq("上试井 新行井号 = 井B", amap[("6.上试井", 1)].new_value, "井B")
+    eq("井口整改 完成时间写在工程设计实际列",
+       amap[("9.井口整改", 6)].new_value, "2026-03-03")
+    eq("修井作业 审核中写审核人（沿用既有规则）",
+       amap[("7.修井作业", 4)].new_value, "张三（审核中）")
+    eq("新行行号 = 第 6 行（1-based）", amap[("8.封堵井", 0)].row, 6)
+    eq("新增动作全部是 write",
+       all(a.action == "write" for a in acts), True)
+
+    # ---- K3. 目标 sheet 不存在：跳过并告警 ----
+    tb3 = src / "no_sheet.xls"
+    _write_append_trackbook(tb3, _APPEND_SHEETS[:3])
+    track3 = TrackBook(tb3)
+    acts3, info3 = sync_engine.build_append_actions(
+        track3.sheets, idx, create_missing_sheet=False)
+    eq("缺井口整改表且不自动建表时只新增 3 口", info3["total"], 3)
+    eq("井C 被跳过", [x["well"] for x in info3["no_sheet"]], ["井C"])
+    eq("跳过原因关键字 = 井口整改",
+       info3["no_sheet"][0]["keyword"], "井口整改")
+
+    # ---- K4. --append-fallback 回退到修井作业表 ----
+    acts4, info4 = sync_engine.build_append_actions(
+        track3.sheets, idx, fallback_on_missing_sheet=True,
+        create_missing_sheet=False)
+    eq("回退后新增 4 口", info4["total"], 4)
+    eq("井C 落到修井作业表",
+       info4["by_sheet"]["7.修井作业"]["wells"], ["井C", "井D"])
+
+    # ---- K5. 真实写回（原地保格式）+ 幂等 ----
+    _src_path, _bak, kept = write_inplace(track, acts,
+                                          backup_dir=src, make_backup=False)
+    eq("原地写入保留格式", kept, True)
+    track2 = TrackBook(tb)
+    _acts5, info5 = sync_engine.build_append_actions(track2.sheets, idx)
+    eq("重跑不再新增（幂等）", info5["total"], 0)
+
+    ts8 = next(t for t in track2.sheets if "封堵井" in t.name)
+    eq("封堵井行数 5 → 6", ts8.sheet.nrows, 6)
+    eq("新行序号 = 2", ts8.cell(5, 0), "2")
+    eq("新行井号 = 井A", ts8.cell(5, 1), "井A")
+    eq("新行完成时间 = 2026-01-01", ts8.cell(5, 4), "2026-01-01")
+    eq("新行其它列留空", ts8.cell(5, 2), "")
+    rb = xlrd.open_workbook(str(tb), formatting_info=True)
+    eq("合并单元格数量不变",
+       len(rb.sheet_by_name("8.封堵井").merged_cells), 1)
+
+    # ---- K6. 副本模式也能写出新增行 ----
+    out = src / "copy.xls"
+    write_back(track, acts, out_path=out)
+    rb2 = xlrd.open_workbook(str(out))
+    eq("副本模式行数 5 → 6", rb2.sheet_by_name("8.封堵井").nrows, 6)
+    eq("副本新行井号 = 井A",
+       rb2.sheet_by_name("8.封堵井").cell_value(5, 1), "井A")
+
+    # ---- K7. detail_reader 认两种措施表头 ----
+    d1 = src / "常规气地质设计-已完成.xls"
+    _write_detail(d1, ["井号", "措施类别", "流程次数", "完成日期"],
+                  [["井X", "永久性封井", 2, "2026-05-05"]])
+    recs1 = load_all([parse_filename(str(d1))])
+    eq("读到「措施类别」", recs1[0].measure, "永久性封井")
+
+    d2 = src / "常规气地质设计-审核中.xls"
+    _write_detail(d2, ["井号", "措施类型", "当前审核人", "上报日期"],
+                  [["井Y", "老井回采", "李四", "2026-06-06"]])
+    recs2 = load_all([parse_filename(str(d2))])
+    eq("读到「措施类型」", recs2[0].measure, "老井回采")
+
+    # ---- K8. 分表规则从大表「对照表」读取，改表即改行为 ----
+    tb8 = src / "with_map.xls"
+    custom_map = [
+        ["措施类别", "对应表单"],
+        ["永久性封井", "上试井"],      # 故意与默认规则不同
+        ["老井回采", "上试井"],
+        ["一类井口整改", "井口整改"],
+        ["其他", "修井作业"],
+    ]
+    _write_append_trackbook(tb8, _APPEND_SHEETS, with_map=custom_map)
+    track8 = TrackBook(tb8)
+    mp, fb = sync_engine.load_measure_map(track8.sheets)
+    eq("对照表规则覆盖默认（永久性封井→上试井）", mp["永久性封井"], "上试井")
+    eq("对照表「其他」作为兜底表", fb, "修井作业")
+    eq("自定义映射解析生效",
+       sync_engine.measure_sheet_keyword("永久性封井", mp, fb), "上试井")
+    _a8, info8 = sync_engine.build_append_actions(track8.sheets, idx)
+    eq("井A 按对照表落到上试井表",
+       info8["by_sheet"]["6.上试井"]["wells"], ["井A", "井B"])
+    eq("「对照表」自身不参与井号匹配",
+       "对照表" in info8["by_sheet"], False)
+
+    # 无对照表时回退到 config 默认规则
+    mp0, fb0 = sync_engine.load_measure_map(track.sheets)
+    eq("无对照表时用默认规则", mp0["永久性封井"], "封堵井")
+    eq("无对照表时用默认兜底", fb0, "修井作业")
+
+    # ---- K9. 目标表缺失时按模板表头自动新建 sheet ----
+    tb9 = src / "create_sheet.xls"
+    _write_append_trackbook(tb9, _APPEND_SHEETS[:3])
+    track9 = TrackBook(tb9)
+    acts9, info9 = sync_engine.build_append_actions(track9.sheets, idx)
+    eq("自动新建后 4 口井全部落表", info9["total"], 4)
+    eq("新建表名按编号规律生成", list(info9["new_sheets"]), ["9.井口整改"])
+    eq("表头模板取「修井作业」表",
+       list(info9["new_sheets"].values()), ["7.修井作业"])
+    eq("井C 落到新建表", info9["by_sheet"]["9.井口整改"]["wells"], ["井C"])
+    eq("不再有被跳过的井", info9["no_sheet"], [])
+
+    _p9, _b9, kept9 = write_inplace(track9, acts9, backup_dir=src,
+                                    make_backup=False,
+                                    new_sheets=info9["new_sheets"])
+    eq("含新建表的写回仍保留格式", kept9, True)
+    track9b = TrackBook(tb9)
+    eq("sheet 数 3 → 4", len(track9b.sheets), 4)
+    eq("新 sheet 名", track9b.sheet_names[-1], "9.井口整改")
+    ns = track9b.sheets[-1]
+    eq("新表井号列可按表头定位", ns.well_col(), 1)
+    eq("新表序号列可按表头定位", ns.seq_col(), 0)
+    eq("新表序号 = 1", ns.cell(4, 0), "1")
+    eq("新表井号 = 井C", ns.cell(4, 1), "井C")
+    eq("新表完成时间写在工程设计实际列", ns.cell(4, 6), "2026-03-03")
+    eq("新表其它列留空", ns.cell(4, 2), "")
+    _a9b, info9b = sync_engine.build_append_actions(track9b.sheets, idx)
+    eq("新建表后重跑不再新增（幂等）", info9b["total"], 0)
+
+
 # ================================================================ 主流程
 
 def run_tests() -> bool:
@@ -806,6 +1027,7 @@ def run_tests() -> bool:
         test_reports(tmp)
         test_end_to_end(tmp)
         test_phase4_features(tmp)
+        test_append_wells(tmp)
     finally:
         pass  # 保留临时目录便于排查，见文末提示
 

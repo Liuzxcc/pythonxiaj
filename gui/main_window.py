@@ -265,6 +265,9 @@ class SyncWindow:
             "stages": list(config.STAGE_KEYS),
             "allow_recheck_overwrite": False,
             "restructure": False,
+            "append_missing_wells": True,              # 按措施类别自动补井号行
+            "append_fallback_on_missing_sheet": False,  # 目标表缺失时跳过并告警
+            "append_create_missing_sheet": True,        # 按对照表自动新建缺失的目标表
         }
 
         self._running = True
@@ -305,15 +308,28 @@ class SyncWindow:
         if stat["write"] == 0 and stat["total"] == 0:
             lines.append("未发现可处理的明细文件，请检查源目录与文件命名。")
 
-        # 明细有、但大表无对应行的井（"数据没写进去"的真因）
-        unmatched = result.get("unmatched") or {}
-        if unmatched:
-            total_miss = sum(len(v) for v in unmatched.values())
-            stages = "、".join("%s %d 口" % (s, len(v)) for s, v in unmatched.items())
-            lines.append("⚠ 明细有 %d 口井在大表找不到对应行、未写入（%s）"
-                         % (total_miss, stages))
-            lines.append("　大表是按井号匹配的主表，工具只填已有行、不新建行；"
-                         "请把这些井补进大表，或确认是否在用正确的大表。")
+        # 按措施类别自动新增井号行的结果
+        appended = result.get("appended") or {}
+        if appended.get("enabled"):
+            if appended.get("total"):
+                detail = "、".join(
+                    "%s +%d 口" % (sn, slot["count"])
+                    for sn, slot in (appended.get("by_sheet") or {}).items())
+                lines.append("✅ 已按措施类别新增 %d 口井：%s"
+                             % (appended["total"], detail))
+                lines.append("　新增行只写序号 / 井号 / 完成时间，其余列留空")
+            for nn, tpl in (appended.get("new_sheets") or {}).items():
+                lines.append("➕ 已新建工作表「%s」（表头复制自「%s」）" % (nn, tpl))
+            no_sheet = appended.get("no_sheet") or []
+            if no_sheet:
+                kws = sorted({str(x.get("keyword", "")) for x in no_sheet})
+                lines.append("⚠ %d 口井的目标表不存在（表名需含 %s），未新增"
+                             % (len(no_sheet),
+                                " / ".join("「%s」" % k for k in kws)))
+        elif result.get("unmatched"):
+            total_miss = sum(len(v) for v in result["unmatched"].values())
+            lines.append("ℹ 明细有 %d 口井在大表无对应行（自动新增已关闭）"
+                         % total_miss)
 
         self.status_label.config(text="\n".join(lines), fg=OK_FG, bg=OK_BG)
 

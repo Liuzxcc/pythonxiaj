@@ -26,7 +26,8 @@ from . import config, restructure as rst
 from .detail_reader import load_all
 from .filename_parser import is_trackbook, scan_dir
 from .reports import build_logger, summarize, write_diff
-from .sync_engine import build_stage_index, sync_sheet, unmatched_detail_wells
+from .sync_engine import (build_append_actions, build_stage_index,
+                          sync_sheet, unmatched_detail_wells)
 from .trackbook import TrackBook
 from .writer import write_back, write_inplace
 
@@ -123,13 +124,57 @@ def _run(cfg: dict, on_log, on_done, on_error):
                     on_log("    ⚠ %s 缺少'实际完成'列，已回退到'当前进度'；"
                            "建议先执行列结构调整" % c)
 
-        # ---- 4.5 明细有但大表无对应行的井（"数据没写进去"的真因）----
+        # ---- 4.5 明细有但大表无对应行的井 ----
+        # 开启自动新增后由 4.6 统一处理并汇报；关闭时才需要提示"未写入"
         unmatched = unmatched_detail_wells(track.sheets, stage_index)
-        for stage, wells in unmatched.items():
-            preview = "、".join(wells[:12]) + (" …" if len(wells) > 12 else "")
-            on_log("⚠ [%s] 明细中有 %d 口井在大表找不到对应行，未写入"
-                   "（大表是按井号匹配的主表，工具只填已有行、不新建行）：%s"
-                   % (stage, len(wells), preview))
+        append_enabled = cfg.get("append_missing_wells", config.APPEND_MISSING_WELLS)
+        if not append_enabled:
+            for stage, wells in unmatched.items():
+                preview = "、".join(wells[:12]) + (" …" if len(wells) > 12 else "")
+                on_log("⚠ [%s] 明细中有 %d 口井在大表找不到对应行，未写入：%s"
+                       % (stage, len(wells), preview))
+
+        # ---- 4.6 按措施类别自动新增井号行（只写序号 / 井号 / 完成时间）----
+        appended = {"enabled": False, "by_sheet": {}, "no_sheet": [],
+                    "total": 0, "new_sheets": {}}
+        if cfg.get("append_missing_wells", config.APPEND_MISSING_WELLS):
+            appended["enabled"] = True
+            append_actions, append_info = build_append_actions(
+                track.sheets, stage_index,
+                cfg.get("append_fallback_on_missing_sheet",
+                        config.APPEND_FALLBACK_ON_MISSING_SHEET),
+                cfg.get("append_create_missing_sheet",
+                        config.APPEND_CREATE_MISSING_SHEET))
+            actions.extend(append_actions)
+            appended.update(append_info)
+            on_log("  分表规则：%s；其他 → %s"
+                   % ("、".join("%s→%s" % (k, v)
+                               for k, v in append_info.get("measure_map", {}).items()),
+                      append_info.get("fallback_keyword",
+                                      config.MEASURE_FALLBACK_KEYWORD)))
+            for nn, tpl in append_info.get("new_sheets", {}).items():
+                on_log("  ➕ 自动新建 sheet「%s」（表头结构复制自「%s」）"
+                       % (nn, tpl))
+            if append_info["total"]:
+                on_log("✓ 按措施类别自动新增 %d 口井（仅写序号 / 井号 / 完成时间）："
+                       % append_info["total"])
+                for sn, slot in append_info["by_sheet"].items():
+                    preview = "、".join(slot["wells"][:8]) + (
+                        " …" if len(slot["wells"]) > 8 else "")
+                    on_log("    [%s] +%d 口：%s" % (sn, slot["count"], preview))
+            elif not append_info["no_sheet"]:
+                on_log("ℹ 没有需要新增的井号（明细中的井在大表里都已存在）")
+            if append_info["no_sheet"]:
+                by_kw: dict[str, list] = {}
+                for x in append_info["no_sheet"]:
+                    by_kw.setdefault(x["keyword"], []).append(x["well"])
+                for kw, wells in by_kw.items():
+                    preview = "、".join(wells[:8]) + (" …" if len(wells) > 8 else "")
+                    on_log("⚠ %d 口井的目标表不存在（表名需含「%s」），未新增：%s"
+                           % (len(wells), kw, preview))
+                on_log("  请在大表中补齐该 sheet，或用 --append-fallback 回退到「%s」表"
+                       % append_info.get("fallback_keyword",
+                                         config.MEASURE_FALLBACK_KEYWORD))
 
         # ---- 5. 报告 ----
         stat = summarize(actions)
@@ -153,7 +198,8 @@ def _run(cfg: dict, on_log, on_done, on_error):
                 if result_mode == "inplace":
                     src_path, backup, kept_format = write_inplace(
                         track, actions, backup_dir=reports_dir,
-                        make_backup=not no_extra)
+                        make_backup=not no_extra,
+                        new_sheets=appended.get("new_sheets"))
                     synced = src_path
                     on_log("已直接写入原表：%s" % src_path)
                     if backup:
@@ -168,7 +214,8 @@ def _run(cfg: dict, on_log, on_done, on_error):
                     backup = track.backup()
                     synced = write_back(
                         track, actions,
-                        out_path=reports_dir / ("井下作业设计节点跟踪大表.synced-%s.xls" % _ts()))
+                        out_path=reports_dir / ("井下作业设计节点跟踪大表.synced-%s.xls" % _ts()),
+                        new_sheets=appended.get("new_sheets"))
                     on_log("已生成同步后副本（原表未改动）：%s" % synced)
                     on_log("原表已备份：%s" % backup)
                     on_log("⚠ 副本为 xlwt 重建，合并单元格/条件格式丢失，需核对后手动替换。")
@@ -182,7 +229,8 @@ def _run(cfg: dict, on_log, on_done, on_error):
             on_done({"actions": actions, "stat": stat, "diff": diff_path,
                      "synced": synced, "backup": backup, "kept_format": kept_format,
                      "mode": result_mode, "log": logger.log_path,
-                     "restructure": synced_note, "unmatched": unmatched})
+                     "restructure": synced_note, "unmatched": unmatched,
+                     "appended": appended})
 
     except Exception as e:
         tb = traceback.format_exc()
@@ -258,4 +306,7 @@ def default_cfg() -> dict:
         "stages": list(config.STAGE_KEYS),
         "allow_recheck_overwrite": config.ALLOW_RECHECK_OVERWRITE,
         "restructure": False,
+        "append_missing_wells": config.APPEND_MISSING_WELLS,
+        "append_fallback_on_missing_sheet": config.APPEND_FALLBACK_ON_MISSING_SHEET,
+        "append_create_missing_sheet": config.APPEND_CREATE_MISSING_SHEET,
     }

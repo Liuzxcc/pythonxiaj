@@ -15,7 +15,7 @@ import xlrd
 
 from . import config
 from .detail_reader import _cell, find_col
-from .pathutil import nfc, norm_header, safe_path
+from .pathutil import canon, nfc, norm_header, safe_path
 
 
 def stage_config(stage_key: str):
@@ -36,6 +36,51 @@ class TrackSheet:
 
     def cell(self, r: int, c: int) -> str:
         return _cell(self.sheet, r, c)
+
+    def well_col(self) -> int:
+        """井号列（按一级表头文本定位，严禁硬编码列号）；找不到返回 -1。"""
+        try:
+            return find_col(self.sheet, config.ROW_STAGE_HEADER,
+                            [config.COL_NAME_WELL])
+        except KeyError:
+            return -1
+
+    def seq_col(self) -> int:
+        """序号列；找不到返回 -1（模板没有序号列时不写序号）。"""
+        try:
+            return find_col(self.sheet, config.ROW_STAGE_HEADER,
+                            [config.COL_NAME_SEQ])
+        except KeyError:
+            return -1
+
+    def last_data_row(self) -> int:
+        """最后一个「井号列非空」的数据行（0-based）。无数据返回 ROW_DATA_START-1。
+
+        不直接用 sheet.nrows —— 大表尾部常有带格式的空行，从那里追加会把
+        新井号隔在空行后面。
+        """
+        cw = self.well_col()
+        sh = self.sheet
+        if cw < 0:
+            return sh.nrows - 1
+        last = config.ROW_DATA_START - 1
+        for r in range(config.ROW_DATA_START, sh.nrows):
+            if canon(self.cell(r, cw)):
+                last = r
+        return last
+
+    def max_seq(self) -> int:
+        """现有序号的最大值，用于给新增行续号。"""
+        cs = self.seq_col()
+        if cs < 0:
+            return 0
+        mx = 0
+        for r in range(config.ROW_DATA_START, self.sheet.nrows):
+            try:
+                mx = max(mx, int(float(self.cell(r, cs))))
+            except (TypeError, ValueError):
+                continue
+        return mx
 
     def locate(self, stage: str) -> dict | None:
         """定位某阶段的"实际"列。找不到返回 None（该 sheet 无此阶段）。

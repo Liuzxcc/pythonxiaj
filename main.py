@@ -66,6 +66,9 @@ def run_cli(args):
     cfg["stages"] = args.stage if args.stage else list(config.STAGE_KEYS)
     cfg["inplace"] = not bool(args.copy_mode)
     cfg["no_extra_files"] = not bool(args.report)
+    cfg["append_missing_wells"] = not bool(args.no_append_missing_wells)
+    cfg["append_fallback_on_missing_sheet"] = bool(args.append_fallback)
+    cfg["append_create_missing_sheet"] = not bool(args.no_create_missing_sheet)
 
     result = {}
 
@@ -108,6 +111,12 @@ def main():
                         help="允许『已完成』被『审核中』覆盖（回退场景）")
     parser.add_argument("--restructure", action="store_true",
                         help="先执行 sheet 7 列结构调整（工艺设计补两列）")
+    parser.add_argument("--no-append-missing-wells", action="store_true",
+                        help="关闭「按措施类别自动新增大表中不存在的井号」（默认开启）")
+    parser.add_argument("--append-fallback", action="store_true",
+                        help="目标 sheet 不存在时，回退到表名含「修井作业」的表（默认跳过并告警）")
+    parser.add_argument("--no-create-missing-sheet", action="store_true",
+                        help="关闭「按对照表自动新建缺失的目标 sheet」（默认开启）")
     args = parser.parse_args()
 
     if args.cli:

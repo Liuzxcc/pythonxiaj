@@ -129,6 +129,7 @@ class DetailRecord:
     value: str           # 完成日期 或 当前审核人
     flow_count: int = 0
     source_name: str = ""
+    measure: str = ""    # 措施类别 / 措施类型（决定新增行落到哪个 sheet）
 
 
 @dc.dataclass
@@ -182,6 +183,232 @@ def unmatched_detail_wells(track_sheets: list, stage_index: dict) -> dict:
         if miss:
             out[stage] = miss
     return out
+
+
+def load_measure_map(track_sheets) -> tuple[dict, str]:
+    """从跟踪大表的「对照表」sheet 读取「措施类别 → 对应表单」映射。
+
+    对照表示例（第 1 列为类别、第 2 列为表名关键字）：
+        措施类别      | 对应表单
+        永久性封井    | 封堵井
+        老井回采      | 上试井
+        一类井口整改  | 井口整改
+        其他          | 修井作业   ← 作为兜底表关键字
+
+    没有对照表 / 对照表为空时，回退到 config 里的默认规则，
+    这样规则随大表走，用户改对照表即可生效，无需改代码。
+    """
+    mapping: dict[str, str] = {}
+    fallback = config.MEASURE_FALLBACK_KEYWORD
+    for ts in track_sheets:
+        if "对照表" not in ts.name:
+            continue
+        sh = ts.sheet
+        for r in range(sh.nrows):
+            k = nfc(ts.cell(r, 0)).strip()
+            v = nfc(ts.cell(r, 1)).strip()
+            if not k or not v or k in ("措施类别", "措施类型", "对应表单"):
+                continue
+            if k in ("其他", "其它", "其它类别", "默认"):
+                fallback = v
+            else:
+                mapping[k] = v
+        break
+    return (mapping or dict(config.MEASURE_SHEET_KEYWORDS)), fallback
+
+
+def measure_sheet_keyword(measure: str, mapping: dict | None = None,
+                          fallback: str | None = None) -> str:
+    """措施类别 → 目标 sheet 名应包含的关键字。"""
+    m = nfc(measure).strip()
+    mp = mapping if mapping is not None else config.MEASURE_SHEET_KEYWORDS
+    fb = fallback if fallback is not None else config.MEASURE_FALLBACK_KEYWORD
+    for key, kw in mp.items():
+        if m == key or (m and key in m):
+            return kw
+    return fb
+
+
+def _sheet_by_keyword(track_sheets, keyword: str):
+    """找表名包含关键字的第一个 sheet。"""
+    for ts in track_sheets:
+        if keyword in ts.name:
+            return ts
+    return None
+
+
+class _VirtualSheet:
+    """待新建的 sheet：列结构沿用模板表，本身没有数据行。"""
+
+    def __init__(self, name: str, template):
+        self.name = name
+        self._tpl = template
+
+    def well_col(self):
+        return self._tpl.well_col()
+
+    def seq_col(self):
+        return self._tpl.seq_col()
+
+    def locate(self, stage):
+        return self._tpl.locate(stage)
+
+    def last_data_row(self):
+        return config.ROW_DATA_START - 1   # 新表从数据起始行开始写
+
+    def max_seq(self):
+        return 0                            # 新表序号从 1 开始
+
+
+def _template_sheet(track_sheets):
+    """挑一张业务表作模板：优先「修井作业」表（列最全），排除「对照表」。"""
+    for ts in track_sheets:
+        if config.MEASURE_FALLBACK_KEYWORD in ts.name:
+            return ts
+    for ts in track_sheets:
+        if "对照表" not in ts.name and ts.well_col() >= 0:
+            return ts
+    return None
+
+
+def _new_sheet_name(track_sheets, keyword: str) -> str:
+    """按现有编号规律生成新表名，如 '9.井口整改-陈亚妮'。"""
+    nums, suffix = [], ""
+    for ts in track_sheets:
+        m = re.match(r"^\s*(\d+)\.", ts.name)
+        if not m:
+            continue
+        nums.append(int(m.group(1)))
+        if "-" in ts.name:
+            suffix = "-" + ts.name.split("-", 1)[1]
+    n = max(nums) + 1 if nums else 1
+    return "%d.%s%s" % (n, keyword, suffix)
+
+
+def build_append_actions(track_sheets: list, stage_index: dict,
+                         fallback_on_missing_sheet: bool | None = None,
+                         create_missing_sheet: bool | None = None):
+    """为「明细有、大表无」的井生成新增行的写入动作。
+
+    规则（按需求）：
+        永久性封井   → 表名含「封堵井」的 sheet
+        老井回采     → 表名含「上试井」的 sheet
+        一类井口整改 → 表名含「井口整改」的 sheet
+        其余措施类别 → 表名含「修井作业」的 sheet
+
+    只写三类字段：序号、井号、各参与节点的「实际完成」（完成时间）列，
+    其余列一律留空。每个单元格生成一个 action="write" 的 Action，
+    因此可直接复用现有 write_inplace / write_back 链路，无需改协议。
+
+    幂等：新增行写入后，下次扫描该井号已在 book_wells 中，不会重复新增。
+
+    返回 (actions, info)；info 含 by_sheet / no_sheet / total。
+    """
+    if fallback_on_missing_sheet is None:
+        fallback_on_missing_sheet = config.APPEND_FALLBACK_ON_MISSING_SHEET
+    if create_missing_sheet is None:
+        create_missing_sheet = config.APPEND_CREATE_MISSING_SHEET
+
+    # 1) 大表所有 sheet 里已存在的井号（跨 sheet、跨阶段统一判定）
+    book_wells: set[str] = set()
+    for ts in track_sheets:
+        cw = ts.well_col()
+        if cw < 0:
+            continue
+        for r in range(config.ROW_DATA_START, ts.sheet.nrows):
+            w = canon(ts.cell(r, cw))
+            if w:
+                book_wells.add(w)
+
+    # 2) 按井号聚合：一口井只新增一行，多个节点的完成时间各填各的列
+    #    key 统一再 canon 一次，避免调用方传入未归一化的井号导致重复新增
+    by_well: dict[str, dict] = {}
+    for stage, well2rec in stage_index.items():
+        for well, rec in well2rec.items():
+            wkey = canon(well)
+            if wkey in book_wells:
+                continue
+            item = by_well.setdefault(wkey, {"display": rec.well_display, "recs": []})
+            item["recs"].append((stage, rec))
+
+    actions: list[Action] = []
+    info: dict = {"by_sheet": {}, "no_sheet": [], "total": 0,
+                  "new_sheets": {}}   # new_sheets: {新表名: 模板表名}
+    state: dict[str, dict] = {}   # 每个目标 sheet 的追加行号 / 序号游标
+    virtuals: dict = {}           # keyword -> _VirtualSheet（同一次运行复用）
+
+    # 规则优先取大表「对照表」，读不到才用 config 默认
+    measure_map, fallback_kw = load_measure_map(track_sheets)
+    info["measure_map"] = measure_map
+    info["fallback_keyword"] = fallback_kw
+
+    for wkey, item in sorted(by_well.items()):
+        recs = item["recs"]
+        # 措施类别：优先取有值、流程次数最大的那条记录
+        best = max(recs, key=lambda p: (bool(p[1].measure), p[1].flow_count,
+                                        p[1].source_name))
+        measure = nfc(best[1].measure).strip()
+        kw = measure_sheet_keyword(measure, measure_map, fallback_kw)
+        ts = _sheet_by_keyword(track_sheets, kw)
+        if ts is None and create_missing_sheet:
+            # 目标表不存在：按模板表头自动新建（同一 keyword 只建一张）
+            ts = virtuals.get(kw)
+            if ts is None:
+                tpl = _template_sheet(track_sheets)
+                if tpl is not None:
+                    ts = _VirtualSheet(_new_sheet_name(track_sheets, kw), tpl)
+                    virtuals[kw] = ts
+                    info["new_sheets"][ts.name] = tpl.name
+        if ts is None and fallback_on_missing_sheet:
+            kw = fallback_kw
+            ts = _sheet_by_keyword(track_sheets, kw)
+        if ts is None:
+            # 目标表不存在：默认跳过并告警，绝不擅自把数据放到别的表
+            info["no_sheet"].append({"well": item["display"],
+                                     "measure": measure, "keyword": kw})
+            continue
+        cwell = ts.well_col()
+        if cwell < 0:
+            info["no_sheet"].append({"well": item["display"], "measure": measure,
+                                     "keyword": kw + "（该表无井号列）"})
+            continue
+
+        st = state.get(ts.name)
+        if st is None:
+            st = {"row": ts.last_data_row() + 1, "seq": ts.max_seq()}
+            state[ts.name] = st
+        r = st["row"]
+        st["row"] += 1
+        st["seq"] += 1
+
+        cells: dict[int, str] = {}
+        cseq = ts.seq_col()
+        if cseq >= 0:
+            cells[cseq] = str(st["seq"])
+        cells[cwell] = item["display"]
+        for stage, rec in recs:
+            cols = ts.locate(stage)
+            if cols is None or cols["actual"] < 0:
+                continue
+            val = format_value(rec.value, rec.status)
+            if val:
+                cells[cols["actual"]] = val
+
+        label = measure or "未填写"
+        for c, v in sorted(cells.items()):
+            actions.append(Action(
+                well=wkey, well_display=item["display"], sheet=ts.name,
+                row=r + 1, stage="新增井号", target_col=c,
+                old_value="", new_value=v, action="write",
+                reason="按措施类别「%s」新增到含「%s」的表（序号/井号/完成时间）"
+                       % (label, kw),
+            ))
+        slot = info["by_sheet"].setdefault(ts.name, {"count": 0, "wells": []})
+        slot["count"] += 1
+        slot["wells"].append(item["display"])
+        info["total"] += 1
+
+    return actions, info
 
 
 def build_stage_index(records: list[DetailRecord]) -> dict:

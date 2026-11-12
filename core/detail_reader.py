@@ -89,6 +89,13 @@ def load_detail(pf: ParsedFile) -> list[DetailRecord]:
     except KeyError:
         col_flow = -1
 
+    # 措施类别（已完成表叫「措施类别」，审核中表叫「措施类型」）
+    # 只用于「大表无此井号」时决定新增到哪个 sheet；找不到也不影响原有同步
+    try:
+        col_measure = find_col(sh, config.ROW_DETAIL_HEADER, config.DETAIL_COL_MEASURE)
+    except KeyError:
+        col_measure = -1
+
     out: list[DetailRecord] = []
     for r in range(config.ROW_DETAIL_HEADER + 1, sh.nrows):
         well_disp = _cell(sh, r, col_well)
@@ -109,6 +116,7 @@ def load_detail(pf: ParsedFile) -> list[DetailRecord]:
             value=_cell(sh, r, col_value),
             flow_count=flow,
             source_name=path.name,
+            measure=_cell(sh, r, col_measure) if col_measure >= 0 else "",
         ))
     return out
 
